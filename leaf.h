@@ -8,6 +8,7 @@
 #include <sys/mman.h>
 #include <elf.h>
 #include <errno.h>
+#include <dlfcn.h>
 
 #ifdef LEAF_32BIT
 #define LeafEhdr Elf32_Ehdr
@@ -254,6 +255,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	size_t reloc_ent_size;
 	
 	LeafSym *symtab = NULL;
+	size_t sym_count = 0;
 	size_t sym_ent_size;
 	
 	void *init_array = NULL;
@@ -270,6 +272,10 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				self->dl_handles = realloc(self->dl_handles, (self->dl_handle_count + 1) * sizeof *self->dl_handles);
 				self->dl_handles[self->dl_handle_count] = (void *) dyns[i].d_un.d_ptr; // we will fix the pointers later
 				self->dl_handle_count += 1;
+				break;
+			}
+			case DT_HASH: {
+				sym_count = ((Elf32_Word *)(self->blob + dyns[i].d_un.d_ptr))[1];
 				break;
 			}
 			case DT_STRTAB: {
@@ -336,6 +342,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	if (!symtab) { return "Could not find symbol table address"; }
 	if (!init_array) { return "Could not find init array address"; }
 	if (!fini_array) { return "Could not find fini array address"; }
+	if (!sym_count) { return "Could not find number of symbols"; }
 	
 	// Correct needed library string names
 	for (size_t i = 0; i < self->dl_handle_count; i++) {
@@ -345,16 +352,25 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	// Load dependent libraries
 	for (size_t i = 0; i < self->dl_handle_count; i++) {
 		printf("Dep lib soname: %s\n", (char *)self->dl_handles[i]);
+		self->dl_handles[i] = dlopen(self->dl_handles[i], RTLD_NOW | RTLD_GLOBAL);
+		if (!self->dl_handles[i]) {
+			printf("Loading lib failed! Continuing anyways...\n");
+		}
 	}
 	
 	// Build symbol table
 	// TODO
+	printf("Have %zd symbols\n", sym_count);
 	
 	// Preform relocations
 	// TODO
+	size_t reloc_count = reloc_size / reloc_ent_size;
+	printf("Will preform %zu relocations...\n", reloc_count);
 	
 	// Call init functions
 	// TODO
+	
+	LeafStreamFree(stream); // TODO free if it fails
 	
 	return NULL;
 }
