@@ -527,7 +527,7 @@ void LeafDoRela(Leaf *self, LeafRela *relocs, size_t reloc_count) {
 			case R_AARCH64_GLOB_DAT:
 			case R_AARCH64_JUMP_SLOT: {
 				LeafSym *sym = &self->symtab[LeafRelocSym(rela->r_info)];
-				printf("process reloc: %s (0x%016zx) + 0x%zx\n", self->strtab + sym->st_name, sym->st_value, rela->r_addend);
+				// printf("process reloc: %s (0x%016zx) + 0x%zx\n", self->strtab + sym->st_name, sym->st_value, rela->r_addend);
 				*((size_t *)where) = sym->st_value + rela->r_addend;
 				break;
 			}

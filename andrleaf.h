@@ -17,6 +17,7 @@
 #define LeafDyn  Elf32_Dyn
 #define LeafRela Elf32_Rela
 #define LeafSym  Elf32_Sym
+#define LeafAddr Elf32_Addr
 #define LeafRelocSym(i) (i >> 8)
 #define LeafRelocType(i) (i & 0xff)
 #else
@@ -26,6 +27,7 @@
 #define LeafDyn  Elf64_Dyn
 #define LeafRela Elf64_Rela
 #define LeafSym  Elf64_Sym
+#define LeafAddr Elf64_Addr
 #define LeafRelocSym(i) (i >> 32)
 #define LeafRelocType(i) (i & 0xffffffff)
 #endif
@@ -438,7 +440,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 						void *symbol_value = dlsym(self->dl_handles[j], symbol_name);
 						
 						if (symbol_value) {
-							sym->st_value = (size_t) symbol_value;
+							sym->st_value = (LeafAddr) symbol_value;
 							break;
 						}
 					}
@@ -450,6 +452,8 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				else {
 					__android_log_print(ANDROID_LOG_INFO, "leaflib", "Warning: External symbol named '%s' not found.\n", symbol_name);
 				}
+				
+				break;
 			}
 			default: {
 				// not a special case, just relocate relative to blob
@@ -470,10 +474,10 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	}
 	
 	// debug: basic dump of symbol table
-	__android_log_print(ANDROID_LOG_INFO, "leaflib", "symbol table after relocs:\n");
-	for (size_t i = 0; i < sym_count; i++) {
-		__android_log_print(ANDROID_LOG_INFO, "leaflib", "[%04zu] 0x%016zx %s\n", i, symtab[i].st_value, strtab + symtab[i].st_name);
-	}
+	// __android_log_print(ANDROID_LOG_INFO, "leaflib", "symbol table after relocs:\n");
+	// for (size_t i = 0; i < sym_count; i++) {
+	// 	__android_log_print(ANDROID_LOG_INFO, "leaflib", "[%04zu] 0x%016zx %s\n", i, symtab[i].st_value, strtab + symtab[i].st_name);
+	// }
 	
 	// Preform relocations
 	size_t reloc_count = reloc_size / reloc_ent_size;
@@ -523,6 +527,7 @@ void LeafDoRela(Leaf *self, LeafRela *relocs, size_t reloc_count) {
 			case R_AARCH64_GLOB_DAT:
 			case R_AARCH64_JUMP_SLOT: {
 				LeafSym *sym = &self->symtab[LeafRelocSym(rela->r_info)];
+				// __android_log_print(ANDROID_LOG_INFO, "leaflib", "process reloc: %s (0x%016zx) + 0x%zx\n", self->strtab + sym->st_name, sym->st_value, rela->r_addend);
 				*((size_t *)where) = sym->st_value + rela->r_addend;
 				break;
 			}
