@@ -263,6 +263,9 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	size_t reloc_size;
 	size_t reloc_ent_size;
 	
+	LeafRela *plt_relocs = NULL;
+	size_t plt_relocs_size;
+	
 	LeafSym *symtab = NULL;
 	size_t sym_count = 0;
 	size_t sym_ent_size;
@@ -281,6 +284,10 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				self->dl_handles = realloc(self->dl_handles, (self->dl_handle_count + 1) * sizeof *self->dl_handles);
 				self->dl_handles[self->dl_handle_count] = (void *) dyns[i].d_un.d_ptr; // we will fix the pointers later
 				self->dl_handle_count += 1;
+				break;
+			}
+			case DT_PLTRELSZ: {
+				plt_relocs_size = dyns[i].d_un.d_val;
 				break;
 			}
 			case DT_HASH: {
@@ -323,6 +330,16 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				printf("Leaf: DT_BIND_NOW\n");
 				break;
 			}
+			case DT_PLTREL: {
+				if (dyns[i].d_un.d_val != DT_RELA) {
+					return "Using ElfXX_Rel instead of ElfX_Rela for PLT is not supported";
+				}
+				break;
+			}
+			case DT_JMPREL: {
+				plt_relocs = self->blob + dyns[i].d_un.d_ptr;
+				break;
+			}
 			case DT_INIT_ARRAY: {
 				init_array = self->blob + dyns[i].d_un.d_ptr;
 				break;
@@ -349,6 +366,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	if (!strtab) { return "Could not find string table address"; }
 	if (!relocs) { return "Could not find relocs"; }
 	if (!symtab) { return "Could not find symbol table address"; }
+	if (!plt_relocs) { return "Could not find PLT relocs address"; }
 	if (!init_array) { return "Could not find init array address"; }
 	if (!fini_array) { return "Could not find fini array address"; }
 	if (!sym_count) { return "Could not find number of symbols"; }
@@ -425,8 +443,11 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	
 	// Preform relocations
 	size_t reloc_count = reloc_size / reloc_ent_size;
+	size_t plt_reloc_count = plt_relocs_size / reloc_ent_size;
 	printf("Will preform %zu relocations (DT_RELA)...\n", reloc_count);
 	LeafDoRela(self, relocs, reloc_count);
+	printf("Will preform %zu relocations (DT_JMPREL)...\n", plt_reloc_count);
+	LeafDoRela(self, plt_relocs, plt_reloc_count);
 	
 	// TODO The other ones???
 	
