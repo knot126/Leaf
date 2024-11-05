@@ -29,6 +29,8 @@ typedef struct Leaf {
 	LeafEhdr *ehdr;
 	LeafPhdr **phdrs;
 	void *blob;
+	void **dl_handles;
+	size_t dl_handle_count;
 } Leaf;
 
 typedef struct LeafStream {
@@ -263,8 +265,11 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	for (size_t i = 0; dyns[i].d_tag != DT_NULL; i++) {
 		switch (dyns[i].d_tag) {
 			case DT_NEEDED: {
-				// TODO: Record offset of string into array
 				printf("Leaf: DT_NEEDED 0x%zx\n", dyns[i].d_un.d_val);
+				// TODO: check if it fails
+				self->dl_handles = realloc(self->dl_handles, (self->dl_handle_count + 1) * sizeof *self->dl_handles);
+				self->dl_handles[self->dl_handle_count] = (void *) dyns[i].d_un.d_ptr; // we will fix the pointers later
+				self->dl_handle_count += 1;
 				break;
 			}
 			case DT_STRTAB: {
@@ -299,6 +304,10 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				printf("Leaf: DT_SYMBOLIC\n");
 				break;
 			}
+			case DT_BIND_NOW: {
+				printf("Leaf: DT_BIND_NOW\n");
+				break;
+			}
 			case DT_INIT_ARRAY: {
 				init_array = self->blob + dyns[i].d_un.d_ptr;
 				break;
@@ -327,6 +336,25 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	if (!symtab) { return "Could not find symbol table address"; }
 	if (!init_array) { return "Could not find init array address"; }
 	if (!fini_array) { return "Could not find fini array address"; }
+	
+	// Correct needed library string names
+	for (size_t i = 0; i < self->dl_handle_count; i++) {
+		self->dl_handles[i] += (size_t)strtab;
+	}
+	
+	// Load dependent libraries
+	for (size_t i = 0; i < self->dl_handle_count; i++) {
+		printf("Dep lib soname: %s\n", (char *)self->dl_handles[i]);
+	}
+	
+	// Build symbol table
+	// TODO
+	
+	// Preform relocations
+	// TODO
+	
+	// Call init functions
+	// TODO
 	
 	return NULL;
 }
