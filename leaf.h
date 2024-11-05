@@ -469,7 +469,10 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 		void (*func)(void) = ((void(**)(void)) init_array)[i];
 		
 		printf("Func addr: <%p>\n", func);
-		// func();
+		
+		if (func) {
+			// func();
+		}
 	}
 	
 	LeafStreamFree(stream); // TODO free if it fails
@@ -535,6 +538,22 @@ const char *LeafLoadFromFile(Leaf *self, const char *path) {
 	free(data);
 	
 	return error;
+}
+
+void *LeafSymbolAddr(Leaf *self, const char *symbol_name) {
+	/**
+	 * Find the address of the given symbol.
+	 * 
+	 * TODO: hash table
+	 */
+	
+	for (size_t i = 0; i < self->sym_count; i++) {
+		if (strcmp(self->strtab + self->symtab[i].st_name, symbol_name) == 0) {
+			return (void *) self->symtab[i].st_value;
+		}
+	}
+	
+	return NULL;
 }
 
 void LeafFree(Leaf *self) {

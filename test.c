@@ -10,6 +10,8 @@ int main(int argc, const char *argv[]) {
 	if (error) {
 		printf("Leaf error: %s\n", error);
 	}
+	printf("Address of android_main: <%p>\n", LeafSymbolAddr(leaf, "android_main"));
+	printf("Address of gGame: <%p>\n", LeafSymbolAddr(leaf, "gGame"));
 	LeafFree(leaf);
 	
 	return 0;
