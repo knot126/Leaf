@@ -11,19 +11,23 @@
 #include <dlfcn.h>
 
 #ifdef LEAF_32BIT
+#define LEAF_CURRENT_CLASS 1
 #define LeafEhdr Elf32_Ehdr
 #define LeafPhdr Elf32_Phdr
 #define LeafDyn  Elf32_Dyn
 #define LeafRela Elf32_Rela
 #define LeafSym  Elf32_Sym
-#define LEAF_CURRENT_CLASS 1
+#define LeafRelocSym(i) (i >> 8)
+#define LeafRelocType(i) (i & 0xff)
 #else
+#define LEAF_CURRENT_CLASS 2
 #define LeafEhdr Elf64_Ehdr
 #define LeafPhdr Elf64_Phdr
 #define LeafDyn  Elf64_Dyn
 #define LeafRela Elf64_Rela
 #define LeafSym  Elf64_Sym
-#define LEAF_CURRENT_CLASS 2
+#define LeafRelocSym(i) (i >> 32)
+#define LeafRelocType(i) (i & 0xffffffff)
 #endif
 
 typedef struct Leaf {
@@ -32,6 +36,9 @@ typedef struct Leaf {
 	void *blob;
 	void **dl_handles;
 	size_t dl_handle_count;
+	const char *strtab;
+	LeafSym *symtab;
+	size_t sym_count;
 } Leaf;
 
 typedef struct LeafStream {
@@ -131,6 +138,8 @@ void *LeafMakeMap(size_t size) {
 }
 
 uint8_t ELF_SIGNATURE[] = {0x7f, 'E', 'L', 'F'};
+
+void LeafDoRela(Leaf *self, LeafRela *relocs, size_t reloc_count);
 
 const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	/**
@@ -344,6 +353,11 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	if (!fini_array) { return "Could not find fini array address"; }
 	if (!sym_count) { return "Could not find number of symbols"; }
 	
+	// save stuff we might want later
+	self->strtab = strtab;
+	self->symtab = symtab;
+	self->sym_count = sym_count;
+	
 	// Correct needed library string names
 	for (size_t i = 0; i < self->dl_handle_count; i++) {
 		self->dl_handles[i] += (size_t)strtab;
@@ -358,14 +372,63 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 		}
 	}
 	
-	// Build symbol table
+	// Reloc everything in symbol table, load external symbols
 	// TODO
-	printf("Have %zd symbols\n", sym_count);
+	printf("Have %zd symbols, fixing up symbol table...\n", sym_count);
+	
+	for (size_t i = 1; i < sym_count; i++) {
+		LeafSym *sym = &symtab[i];
+		
+		switch (sym->st_shndx) {
+			case SHN_ABS: {
+				// "The symbol has an absolute value that will not change
+				// because of relocation."
+				break;
+			}
+			case SHN_COMMON: {
+				printf("Symbol with SHN_COMMON, is this the 90s!?\n");
+				break;
+			}
+			case SHN_UNDEF: {
+				// resolve the symbol in the dumest way possible, also probably
+				// not technically correct since ELF has stricter ordering
+				// requirements than this but whateverthefuck.
+				const char *symbol_name = strtab + sym->st_name;
+				
+				// dlsym(NULL, symbol_name) would be smarter but not sure if
+				// that works in this case...
+				for (size_t j = 0; j < self->dl_handle_count; j++) {
+					if (self->dl_handles[j] != NULL) {
+						void *symbol_value = dlsym(self->dl_handles[j], symbol_name);
+						
+						if (symbol_value) {
+							sym->st_value = (size_t) symbol_value;
+							break;
+						}
+					}
+				}
+				
+				if (sym->st_value) {
+					printf("Found symbol '%s' at <0x%zx>\n", symbol_name, sym->st_value);
+				}
+				else {
+					printf("Warning: External symbol named '%s' not found.\n", symbol_name);
+				}
+			}
+			default: {
+				// not a special case, just relocate relative to blob
+				sym->st_value += (size_t) self->blob;
+				break;
+			}
+		}
+	}
 	
 	// Preform relocations
-	// TODO
 	size_t reloc_count = reloc_size / reloc_ent_size;
-	printf("Will preform %zu relocations...\n", reloc_count);
+	printf("Will preform %zu relocations (DT_RELA)...\n", reloc_count);
+	LeafDoRela(self, relocs, reloc_count);
+	
+	// TODO The other ones???
 	
 	// Call init functions
 	// TODO
@@ -373,6 +436,34 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	LeafStreamFree(stream); // TODO free if it fails
 	
 	return NULL;
+}
+
+void LeafDoRela(Leaf *self, LeafRela *relocs, size_t reloc_count) {
+	for (size_t i = 0; i < reloc_count; i++) {
+		LeafRela *rela = &relocs[i];
+		
+		void *where = self->blob + rela->r_offset;
+		
+		switch (LeafRelocType(rela->r_info)) {
+			// TODO other arches
+			case R_AARCH64_RELATIVE: {
+				// I think this works (?) since all symbols are zero in my case.
+				void *result = self->blob + rela->r_addend;
+				*((void **)where) = result;
+				break;
+			}
+			case R_AARCH64_GLOB_DAT:
+			case R_AARCH64_JUMP_SLOT: {
+				LeafSym *sym = &self->symtab[LeafRelocSym(rela->r_info)];
+				*((size_t *)where) = sym->st_value + rela->r_addend;
+				break;
+			}
+			default: {
+				printf("Unknown reloc type: offset=0x%zx sym=0x%zx type=0x%zx addend=0x%zx\n", rela->r_offset, LeafRelocSym(rela->r_info), LeafRelocType(rela->r_info), rela->r_addend);
+				break;
+			}
+		}
+	}
 }
 
 const char *LeafLoadFromFile(Leaf *self, const char *path) {
