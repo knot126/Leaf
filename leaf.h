@@ -39,6 +39,8 @@ typedef struct Leaf {
 	const char *strtab;
 	LeafSym *symtab;
 	size_t sym_count;
+	void *fini_array;
+	size_t fini_count;
 } Leaf;
 
 typedef struct LeafStream {
@@ -375,6 +377,8 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	self->strtab = strtab;
 	self->symtab = symtab;
 	self->sym_count = sym_count;
+	self->fini_array = fini_array;
+	self->fini_count = fini_array_size / sizeof(void *);
 	
 	// Correct needed library string names
 	for (size_t i = 0; i < self->dl_handle_count; i++) {
@@ -427,7 +431,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				}
 				
 				if (sym->st_value) {
-					printf("Found symbol '%s' at <0x%zx>\n", symbol_name, sym->st_value);
+					// printf("Found symbol '%s' at <0x%zx>\n", symbol_name, sym->st_value);
 				}
 				else {
 					printf("Warning: External symbol named '%s' not found.\n", symbol_name);
@@ -441,6 +445,12 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 		}
 	}
 	
+	// debug: basic dump of symbol table
+	// printf("symbol table after relocs:\n");
+	// for (size_t i = 0; i < sym_count; i++) {
+	// 	printf("[%04zu] 0x%016zx %s\n", i, symtab[i].st_value, strtab + symtab[i].st_name);
+	// }
+	
 	// Preform relocations
 	size_t reloc_count = reloc_size / reloc_ent_size;
 	size_t plt_reloc_count = plt_relocs_size / reloc_ent_size;
@@ -449,10 +459,18 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	printf("Will preform %zu relocations (DT_JMPREL)...\n", plt_reloc_count);
 	LeafDoRela(self, plt_relocs, plt_reloc_count);
 	
-	// TODO The other ones???
-	
 	// Call init functions
 	// TODO
+	size_t init_count = init_array_size / sizeof(void *);
+	
+	printf("Calling %zu init functions...\n", init_count);
+	
+	for (size_t i = 0; i < init_count; i++) {
+		void (*func)(void) = ((void(**)(void)) init_array)[i];
+		
+		printf("Func addr: <%p>\n", func);
+		// func();
+	}
 	
 	LeafStreamFree(stream); // TODO free if it fails
 	
