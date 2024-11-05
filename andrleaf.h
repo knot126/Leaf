@@ -17,7 +17,6 @@
 #define LeafDyn  Elf32_Dyn
 #define LeafRela Elf32_Rela
 #define LeafSym  Elf32_Sym
-#define LeafAddr Elf32_Addr
 #define LeafRelocSym(i) (i >> 8)
 #define LeafRelocType(i) (i & 0xff)
 #else
@@ -27,7 +26,6 @@
 #define LeafDyn  Elf64_Dyn
 #define LeafRela Elf64_Rela
 #define LeafSym  Elf64_Sym
-#define LeafAddr Elf64_Addr
 #define LeafRelocSym(i) (i >> 32)
 #define LeafRelocType(i) (i & 0xffffffff)
 #endif
@@ -127,7 +125,7 @@ static void LeafStreamFree(LeafStream *self) {
 // Stub functions
 /////////////////
 int Leaf__cxa_atexit(void (*func)(void *), void *arg, void *dso_handle) {
-	printf("__cxa_atexit(<%p>, <%p>, <%p>)", func, arg, dso_handle);
+	__android_log_print(ANDROID_LOG_INFO, "leaflib", "__cxa_atexit(<%p>, <%p>, <%p>)", func, arg, dso_handle);
 	return 0;
 }
 
@@ -237,7 +235,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 		}
 	}
 	
-	printf("leaf: highest value = 0x%zx, mapping...\n", highest);
+	__android_log_print(ANDROID_LOG_INFO, "leaflib", "leaf: highest value = 0x%zx, mapping...\n", highest);
 	
 	// Map memory for loadable segments, copy their contents
 	self->blob = LeafMakeMap(highest);
@@ -247,7 +245,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	}
 	
 	// load code, data, etc and also find location of dynamic symbol table
-	printf("leaf: mapped at <%p>, copying...\n", self->blob);
+	__android_log_print(ANDROID_LOG_INFO, "leaflib", "leaf: mapped at <%p>, copying...\n", self->blob);
 	
 	LeafDyn *dyns = NULL;
 	
@@ -297,7 +295,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	for (size_t i = 0; dyns[i].d_tag != DT_NULL; i++) {
 		switch (dyns[i].d_tag) {
 			case DT_NEEDED: {
-				printf("Leaf: DT_NEEDED 0x%zx\n", dyns[i].d_un.d_val);
+				__android_log_print(ANDROID_LOG_INFO, "leaflib", "Leaf: DT_NEEDED 0x%zx\n", dyns[i].d_un.d_val);
 				// TODO: check if it fails
 				self->dl_handles = realloc(self->dl_handles, (self->dl_handle_count + 1) * sizeof *self->dl_handles);
 				self->dl_handles[self->dl_handle_count] = (void *) dyns[i].d_un.d_ptr; // we will fix the pointers later
@@ -341,11 +339,11 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				break;
 			}
 			case DT_SYMBOLIC: {
-				printf("Leaf: DT_SYMBOLIC\n");
+				__android_log_print(ANDROID_LOG_INFO, "leaflib", "Leaf: DT_SYMBOLIC\n");
 				break;
 			}
 			case DT_BIND_NOW: {
-				printf("Leaf: DT_BIND_NOW\n");
+				__android_log_print(ANDROID_LOG_INFO, "leaflib", "Leaf: DT_BIND_NOW\n");
 				break;
 			}
 			case DT_PLTREL: {
@@ -375,7 +373,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				break;
 			}
 			default: {
-				printf("Unknown dynamic section entry: 0x%zx\n", dyns[i].d_tag);
+				__android_log_print(ANDROID_LOG_INFO, "leaflib", "Unknown dynamic section entry: 0x%zx\n", dyns[i].d_tag);
 				break;
 			}
 		}
@@ -403,16 +401,16 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	
 	// Load dependent libraries
 	for (size_t i = 0; i < self->dl_handle_count; i++) {
-		printf("Dep lib soname: %s\n", (char *)self->dl_handles[i]);
+		__android_log_print(ANDROID_LOG_INFO, "leaflib", "Dep lib soname: %s\n", (char *)self->dl_handles[i]);
 		self->dl_handles[i] = dlopen(self->dl_handles[i], RTLD_NOW | RTLD_GLOBAL);
 		if (!self->dl_handles[i]) {
-			printf("Loading lib failed! Continuing anyways...\n");
+			__android_log_print(ANDROID_LOG_INFO, "leaflib", "Loading lib failed! Continuing anyways...\n");
 		}
 	}
 	
 	// Reloc everything in symbol table, load external symbols
 	// TODO
-	printf("Have %zd symbols, fixing up symbol table...\n", sym_count);
+	__android_log_print(ANDROID_LOG_INFO, "leaflib", "Have %zd symbols, fixing up symbol table...\n", sym_count);
 	
 	for (size_t i = 1; i < sym_count; i++) {
 		LeafSym *sym = &symtab[i];
@@ -424,7 +422,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				break;
 			}
 			case SHN_COMMON: {
-				printf("Symbol with SHN_COMMON, is this the 90s!?\n");
+				__android_log_print(ANDROID_LOG_INFO, "leaflib", "Symbol with SHN_COMMON, is this the 90s!?\n");
 				break;
 			}
 			case SHN_UNDEF: {
@@ -440,20 +438,18 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 						void *symbol_value = dlsym(self->dl_handles[j], symbol_name);
 						
 						if (symbol_value) {
-							sym->st_value = (LeafAddr) symbol_value;
+							sym->st_value = (size_t) symbol_value;
 							break;
 						}
 					}
 				}
 				
 				if (sym->st_value) {
-					// printf("Found symbol '%s' at <0x%zx>\n", symbol_name, sym->st_value);
+					// __android_log_print(ANDROID_LOG_INFO, "leaflib", "Found symbol '%s' at <0x%zx>\n", symbol_name, sym->st_value);
 				}
 				else {
-					printf("Warning: External symbol named '%s' not found.\n", symbol_name);
+					__android_log_print(ANDROID_LOG_INFO, "leaflib", "Warning: External symbol named '%s' not found.\n", symbol_name);
 				}
-				
-				break;
 			}
 			default: {
 				// not a special case, just relocate relative to blob
@@ -470,33 +466,33 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 		p_cxa_atexit_sym->st_value = (size_t) &Leaf__cxa_atexit;
 	}
 	else {
-		printf("Symbol __cxa_atexit not found for replacement\n");
+		__android_log_print(ANDROID_LOG_INFO, "leaflib", "Symbol __cxa_atexit not found for replacement\n");
 	}
 	
 	// debug: basic dump of symbol table
-	// printf("symbol table after relocs:\n");
-	// for (size_t i = 0; i < sym_count; i++) {
-	// 	printf("[%04zu] 0x%016zx %s\n", i, symtab[i].st_value, strtab + symtab[i].st_name);
-	// }
+	__android_log_print(ANDROID_LOG_INFO, "leaflib", "symbol table after relocs:\n");
+	for (size_t i = 0; i < sym_count; i++) {
+		__android_log_print(ANDROID_LOG_INFO, "leaflib", "[%04zu] 0x%016zx %s\n", i, symtab[i].st_value, strtab + symtab[i].st_name);
+	}
 	
 	// Preform relocations
 	size_t reloc_count = reloc_size / reloc_ent_size;
 	size_t plt_reloc_count = plt_relocs_size / reloc_ent_size;
-	printf("Will preform %zu relocations (DT_RELA)...\n", reloc_count);
+	__android_log_print(ANDROID_LOG_INFO, "leaflib", "Will preform %zu relocations (DT_RELA)...\n", reloc_count);
 	LeafDoRela(self, relocs, reloc_count);
-	printf("Will preform %zu relocations (DT_JMPREL)...\n", plt_reloc_count);
+	__android_log_print(ANDROID_LOG_INFO, "leaflib", "Will preform %zu relocations (DT_JMPREL)...\n", plt_reloc_count);
 	LeafDoRela(self, plt_relocs, plt_reloc_count);
 	
 	// Call init functions
 	// TODO
 	size_t init_count = init_array_size / sizeof(void *);
 	
-	printf("Calling %zu init functions...\n", init_count);
+	__android_log_print(ANDROID_LOG_INFO, "leaflib", "Calling %zu init functions...\n", init_count);
 	
 	for (size_t i = 0; i < init_count; i++) {
 		void (*func)(void) = ((void(**)(void)) init_array)[i];
 		
-		printf("Func addr: <%p>\n", func);
+		__android_log_print(ANDROID_LOG_INFO, "leaflib", "Func addr: <%p>\n", func);
 		
 #ifndef JANK_TESTING_ONLY
 		if (func) {
@@ -527,12 +523,11 @@ void LeafDoRela(Leaf *self, LeafRela *relocs, size_t reloc_count) {
 			case R_AARCH64_GLOB_DAT:
 			case R_AARCH64_JUMP_SLOT: {
 				LeafSym *sym = &self->symtab[LeafRelocSym(rela->r_info)];
-				printf("process reloc: %s (0x%016zx) + 0x%zx\n", self->strtab + sym->st_name, sym->st_value, rela->r_addend);
 				*((size_t *)where) = sym->st_value + rela->r_addend;
 				break;
 			}
 			default: {
-				printf("Unknown reloc type: offset=0x%zx sym=0x%zx type=0x%zx addend=0x%zx\n", rela->r_offset, LeafRelocSym(rela->r_info), LeafRelocType(rela->r_info), rela->r_addend);
+				__android_log_print(ANDROID_LOG_INFO, "leaflib", "Unknown reloc type: offset=0x%zx sym=0x%zx type=0x%zx addend=0x%zx\n", rela->r_offset, LeafRelocSym(rela->r_info), LeafRelocType(rela->r_info), rela->r_addend);
 				break;
 			}
 		}
