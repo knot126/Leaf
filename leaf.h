@@ -2,6 +2,8 @@
  * Leaf - a single header ELF loader.
  */
 
+#ifndef LEAF_HEADER
+#define LEAF_HEADER
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -609,4 +611,5 @@ void LeafFree(Leaf *self) {
 	return;
 }
 
-#endif
+#endif // LEAF_IMPLEMENTATION
+#endif // LEAF_HEADER
