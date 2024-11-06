@@ -36,6 +36,10 @@
 #define LeafRelocType(i) (i & 0xffffffff)
 #endif
 
+// Same for 32/64 bit
+#define LeafSymBind(i) (i >> 4)
+#define LeafSymType(i) (i & 0xf)
+
 typedef struct Leaf {
 	LeafEhdr *ehdr;
 	LeafPhdr **phdrs;
@@ -597,8 +601,17 @@ void LeafDoRel(Leaf *self, LeafRel *relocs, size_t reloc_count) {
 			case R_ARM_GLOB_DAT:
 			case R_ARM_JUMP_SLOT: {
 				LeafSym *sym = &self->symtab[LeafRelocSym(rel->r_info)];
-				*((size_t *)where) += (sym->st_value & 1) ? (sym->st_value ^ 1) : sym->st_value;
-				*((size_t *)where) |= (LeafRelocType(rel->r_info) == STT_FUNC && (sym->st_value & 1)) ? 1 : 0;
+				size_t origval = *((size_t *)where);
+				// TODO im not sure why but some of the addends contained values
+				// that fucked everything up so im just ignoring them. Specifically
+				// this occured for jump slots, but glob dat all have zero so
+				// it doesnt really matter for my purpose...
+				// edit: from the manual for jump slots:
+				// "In a REL form of this relocation the addend, A, is always 0."
+				// *((size_t *)where) += (sym->st_value & 1) ? (sym->st_value ^ 1) : sym->st_value;
+				// *((size_t *)where) |= (LeafSymType(sym->st_info) == STT_FUNC && (sym->st_value & 1)) ? 1 : 0;
+				*((size_t *) where) = sym->st_value;
+				printf("GLOB_DAT/JUMP_SLOT symval=0x%08zx origval=0x%08zx resultval=0x%08zx\n", sym->st_value, origval, *((size_t *)where));
 				break;
 			}
 			default: {
