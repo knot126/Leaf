@@ -31,6 +31,23 @@ void LHHookerRelease(LHHooker *self);
 #define LH_SEXT64(input, nbits) (LH_SEXT_ISNEG(input, nbits) ? (LH_SEXT64_NB(nbits) | input) : input)
 
 // Automatically generated macros for working with ARM instructions
+#define MAKE_AARCH64_ADR(imm, Rd) ((((Rd) & 0x1f) << 0) | (((imm >> 2) & 0x7ffff) << 5) | (0b10000 << 24) | (((imm) & 0x3) << 29) | (0b0 << 31))
+#define AARCH64_ADR_DECODE_IMM(input) ((((input >> 29) & 0x3) << 0) | (((input >> 5) & 0x7ffff) << 2))
+#define AARCH64_ADR_DECODE_RD(input) ((((input >> 0) & 0x1f) << 0))
+
+#define IS_AARCH64_ADR(input) ((input & 0x9f000000) == 0x10000000)
+#define MAKE_AARCH64_ADRP(imm, Rd) ((((Rd) & 0x1f) << 0) | (((imm >> 2) & 0x7ffff) << 5) | (0b10000 << 24) | (((imm) & 0x3) << 29) | (0b1 << 31))
+#define AARCH64_ADRP_DECODE_IMM(input) ((((input >> 29) & 0x3) << 0) | (((input >> 5) & 0x7ffff) << 2))
+#define AARCH64_ADRP_DECODE_RD(input) ((((input >> 0) & 0x1f) << 0))
+
+#define IS_AARCH64_ADRP(input) ((input & 0x9f000000) == 0x90000000)
+#define MAKE_AARCH64_LDR_LITERAL(x, imm, Rt) ((((Rt) & 0x1f) << 0) | (((imm) & 0x7ffff) << 5) | (0b011000 << 24) | (((x) & 0x1) << 30) | (0b0 << 31))
+#define AARCH64_LDR_LITERAL_DECODE_X(input) ((((input >> 30) & 0x1) << 0))
+#define AARCH64_LDR_LITERAL_DECODE_IMM(input) ((((input >> 5) & 0x7ffff) << 0))
+#define AARCH64_LDR_LITERAL_DECODE_RT(input) ((((input >> 0) & 0x1f) << 0))
+
+#define IS_AARCH64_LDR_LITERAL(input) ((input & 0xbf000000) == 0x18000000)
+// END AUTO GENERATED MACROS
 
 void *LHHookerMapRwxPages(size_t size) {
 	return mmap(NULL, size, PROT_EXEC | PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -143,8 +160,17 @@ static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size
 	LHStream data; LHStreamInit(&data);
 	
 	for (size_t i = 0; i < block_size; i++) {
-		if (0) {
-			// ... handle various instruction types ...
+		uint32_t ins = old_block[i];
+		
+		if (IS_AARCH64_ADR(ins)) {
+			uint32_t Rd = AARCH64_ADR_DECODE_RD(ins);
+			size_t imm = LH_SEXT64(AARCH64_ADR_DECODE_IMM(ins));
+			
+			size_t result = (size_t) (((void *)&old_block[i]) + imm);
+			size_t offset = LH_INS_OFFSET;
+			
+			LHStreamWrite32(&code, MAKE_AARCH64_LDR_LITERAL(1, offset, Rd));
+			LHStreamWrite64(&data, result);
 		}
 		else {
 			LHStreamWrite32(&code, old_block[i]);
