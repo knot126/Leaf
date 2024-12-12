@@ -83,7 +83,7 @@ class Bits:
 			return f"((({self.name}{f' >> {self.offset}' if self.offset != 0 else ''}) & {hex((1 << self.size) - 1)}) << {shift})"
 	
 	def getDecodeExpr(self, input_name, shift):
-		return f"(({input_name} >> {shift - self.offset}) & {hex((1 << self.getSize()) - 1)})"
+		return f"((({input_name} >> {shift}) & {hex((1 << self.getSize()) - 1)}) << {self.offset})"
 	
 	def getMask(self, shift):
 		return hex(((1 << self.getSize()) - 1) << shift)
