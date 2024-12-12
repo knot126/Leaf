@@ -1,0 +1,6 @@
+# this file contains info for generating arm instruction encode/decode/test functions
+
+# <id: asm-name> (<bit> | ('<' <id: name> ':' <num: size> (':' <num: shift>)? '>'))+ <newline>
+
+aarch64_adr 0<imm:2>10000<imm:19:2><Rd:5>
+aarch64_adrp 1<imm:2>10000<imm:19:2><Rd:5>
