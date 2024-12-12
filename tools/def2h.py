@@ -167,11 +167,9 @@ class Instr:
 				mask |= eval(b.getMask(p))
 				val |= (eval("0b" + b.data) << p)
 			
-			# print(p, bin(mask), len(bin(mask)) - 2, bin(val), len(bin(val)) - 2)
-			
 			p += b.getSize()
 		
-		return f"#define IS_{self.name.upper()}(input) ((input & {bin(mask)}) == {bin(val)})"
+		return f"#define IS_{self.name.upper()}(input) ((input & {hex(mask)}) == {hex(val)})"
 	
 	def __repr__(self):
 		return f"[Instr: {' '.join([repr(x) for x in self.bits])}]"
