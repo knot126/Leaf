@@ -157,6 +157,22 @@ class Instr:
 		
 		return s
 	
+	def getIsDefine(self):
+		p = 0
+		mask = 0
+		val = 0
+		
+		for b in reversed(self.bits):
+			if b.getType() == BitClass.LITERAL:
+				mask |= eval(b.getMask(p))
+				val |= (eval("0b" + b.data) << p)
+			
+			# print(p, bin(mask), len(bin(mask)) - 2, bin(val), len(bin(val)) - 2)
+			
+			p += b.getSize()
+		
+		return f"#define IS_{self.name.upper()}(input) ((input & {bin(mask)}) == {bin(val)})"
+	
 	def __repr__(self):
 		return f"[Instr: {' '.join([repr(x) for x in self.bits])}]"
 
@@ -266,6 +282,7 @@ def main():
 	for x in ins:
 		print(x.getMakeDefine())
 		print(x.getDecodeDefines())
+		print(x.getIsDefine())
 
 if __name__ == "__main__":
 	main()
