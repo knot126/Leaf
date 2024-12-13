@@ -1,5 +1,13 @@
 /**
  * LeafHook - single header hooking library usable with Leaf
+ * 
+ * *****************************************************************************
+ * 
+ * Usage:
+ * 
+ *  - Define `LH_AARCH64` on ARM64, `LH_AARCH32` on ARM32, etc.
+ *  - Create a hooker (`LHHookerCreate()`)
+ *  - Use it to hook functions (`LHHookerHookFunction()`)
  */
 
 #ifndef _LEAFHOOK_HEADER
@@ -8,6 +16,9 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <errno.h>
+#include <unistd.h>
+#include <inttypes.h>
+#include <stdlib.h>
 
 typedef struct LHHooker {
 	void *rwx_block;
@@ -17,6 +28,8 @@ typedef struct LHHooker {
 
 LHHooker *LHHookerCreate(void);
 void LHHookerRelease(LHHooker *self);
+
+bool LHHookerHookFunction(LHHooker *self, void *function, void *hook, void **orig);
 
 #ifdef LEAFHOOK_IMPLEMENTATION
 
@@ -47,6 +60,10 @@ void LHHookerRelease(LHHooker *self);
 #define AARCH64_LDR_LITERAL_DECODE_RT(input) ((((input >> 0) & 0x1f) << 0))
 
 #define IS_AARCH64_LDR_LITERAL(input) ((input & 0xbf000000) == 0x18000000)
+#define MAKE_AARCH64_BR(Rn) ((0b00000 << 0) | (((Rn) & 0x1f) << 5) | (0b1101011000011111000000 << 10))
+#define AARCH64_BR_DECODE_RN(input) ((((input >> 5) & 0x1f) << 0))
+
+#define IS_AARCH64_BR(input) ((input & 0xfffffc1f) == 0xd61f0000)
 // END AUTO GENERATED MACROS
 
 void *LHHookerMapRwxPages(size_t size) {
@@ -146,10 +163,11 @@ static size_t LHStreamTell(LHStream *self) {
 	return self->head;
 }
 
+#ifdef LH_AARCH64
+
 // Offset from next instruction to next available data region
 #define LH_INS_OFFSET (((block_size + 1) * sizeof(uint32_t)) - LHStreamTell(&code) + LHStreamTell(&data))
 
-#ifdef LH_AARCH64
 static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size_t block_size) {
 	/**
 	 * Rewrite a block of instructions located at `old_block` to be position
@@ -165,7 +183,7 @@ static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size
 		
 		if (IS_AARCH64_ADR(ins)) {
 			uint32_t Rd = AARCH64_ADR_DECODE_RD(ins);
-			size_t imm = LH_SEXT64(AARCH64_ADR_DECODE_IMM(ins));
+			size_t imm = LH_SEXT64(AARCH64_ADR_DECODE_IMM(ins), 21);
 			
 			size_t result = (size_t) (((void *)&old_block[i]) + imm);
 			size_t offset = LH_INS_OFFSET;
@@ -176,7 +194,7 @@ static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size
 		else if (IS_AARCH64_ADRP(ins)) {
 			// similar to adr but works with respect to pages
 			uint32_t Rd = AARCH64_ADR_DECODE_RD(ins);
-			size_t imm = LH_SEXT64(AARCH64_ADR_DECODE_IMM(ins)) << 12;
+			size_t imm = LH_SEXT64(AARCH64_ADR_DECODE_IMM(ins), 21) << 12;
 			
 			size_t result = (size_t) ((void *)&old_block[i]);
 			result &= 0xfffffffffffff000;
@@ -189,7 +207,7 @@ static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size
 		else if (IS_AARCH64_LDR_LITERAL(ins)) {
 			bool x = AARCH64_LDR_LITERAL_DECODE_X(ins);
 			uint32_t Rt = AARCH64_LDR_LITERAL_DECODE_RT(ins);
-			size_t imm = LH_SEXT64(AARCH64_LDR_LITERAL_DECODE_IMM(ins)) << 2;
+			size_t imm = LH_SEXT64(AARCH64_LDR_LITERAL_DECODE_IMM(ins), 19) << 2;
 			
 			LHStreamWrite32(&code, MAKE_AARCH64_LDR_LITERAL(x, LH_INS_OFFSET, Rt));
 			
@@ -219,9 +237,53 @@ static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size
 	memcpy(new_block + LHStreamTell(&code), data.data, LHStreamTell(&data));
 	return new_block;
 }
-#endif // LH_AARCH64
+
+static void LHWriteAArch64LongJump(uint32_t *code, void *new_func) {
+	code[0] = MAKE_AARCH64_LDR_LITERAL(1, 8, 17);
+	code[1] = MAKE_AARCH64_BR(17);
+	code[2] = ((uint32_t *)&new_func)[0];
+	code[3] = ((uint32_t *)&new_func)[1];
+}
+
+static bool LHHookerAArch64Function(LHHooker *self, uint32_t *function, uint32_t *hook, uint32_t **orig) {
+	if (orig) {
+		uint32_t *orig_ptr = LHRewriteAArch64Block(self, function, 16);
+		
+		if (!orig_ptr) {
+			return false;
+		}
+		
+		orig[0] = orig_ptr;
+	}
+	
+	LHWriteAArch64LongJump(function, hook);
+	
+	return true;
+}
 
 #undef LH_INS_OFFSET
+
+#endif // LH_AARCH64
+
+#ifdef LH_AARCH32
+
+#endif
+
+bool LHHookerHookFunction(LHHooker *self, void *function, void *hook, void **orig) {
+	/**
+	 * Hook the function pointed to by `function` to call `hook`. Optionally
+	 * write a pointer to where the original function can be invoked at `orig`,
+	 * if it is not null.
+	 */
+	
+	bool success = false;
+#ifdef LH_AARCH64
+	success = LHHookerAArch64Function(self, function, hook, (uint32_t **) orig);
+#elif LH_AARCH32
+	success = LHHookerAArch32Function(self, function, hook, (uint32_t **) orig);
+#endif
+	return success;
+}
 
 #endif // LEAFHOOK_IMPLEMENTATION
 #endif // _LEAFHOOK_HEADER

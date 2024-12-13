@@ -5,3 +5,4 @@
 aarch64_adr 0<imm:2>10000<imm:19:2><Rd:5>
 aarch64_adrp 1<imm:2>10000<imm:19:2><Rd:5>
 aarch64_ldr_literal 0<x:1>011000<imm:19><Rt:5>
+aarch64_br 1101011000011111000000<Rn:5>00000
