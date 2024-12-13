@@ -149,6 +149,7 @@ static size_t LHStreamTell(LHStream *self) {
 // Offset from next instruction to next available data region
 #define LH_INS_OFFSET (((block_size + 1) * sizeof(uint32_t)) - LHStreamTell(&code) + LHStreamTell(&data))
 
+#ifdef LH_AARCH64
 static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size_t block_size) {
 	/**
 	 * Rewrite a block of instructions located at `old_block` to be position
@@ -172,6 +173,35 @@ static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size
 			LHStreamWrite32(&code, MAKE_AARCH64_LDR_LITERAL(1, offset, Rd));
 			LHStreamWrite64(&data, result);
 		}
+		else if (IS_AARCH64_ADRP(ins)) {
+			// similar to adr but works with respect to pages
+			uint32_t Rd = AARCH64_ADR_DECODE_RD(ins);
+			size_t imm = LH_SEXT64(AARCH64_ADR_DECODE_IMM(ins)) << 12;
+			
+			size_t result = (size_t) ((void *)&old_block[i]);
+			result &= 0xfffffffffffff000;
+			result += imm;
+			size_t offset = LH_INS_OFFSET;
+			
+			LHStreamWrite32(&code, MAKE_AARCH64_LDR_LITERAL(1, offset, Rd));
+			LHStreamWrite64(&data, result);
+		}
+		else if (IS_AARCH64_LDR_LITERAL(ins)) {
+			bool x = AARCH64_LDR_LITERAL_DECODE_X(ins);
+			uint32_t Rt = AARCH64_LDR_LITERAL_DECODE_RT(ins);
+			size_t imm = LH_SEXT64(AARCH64_LDR_LITERAL_DECODE_IMM(ins)) << 2;
+			
+			LHStreamWrite32(&code, MAKE_AARCH64_LDR_LITERAL(x, LH_INS_OFFSET, Rt));
+			
+			if (x) {
+				uint64_t d = ((uint64_t *)(((void *)&old_block[i]) + imm))[i];
+				LHStreamWrite64(&data, d);
+			}
+			else {
+				uint32_t d = ((uint32_t *)(((void *)&old_block[i]) + imm))[i];
+				LHStreamWrite32(&data, d);
+			}
+		}
 		else {
 			LHStreamWrite32(&code, old_block[i]);
 		}
@@ -180,7 +210,8 @@ static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size
 	// Insert jump back to end
 	// TODO: Actually figure out which registers are available to use instead of
 	// just using x17
-	LHStreamWrite();
+	LHStreamWrite32(&code, MAKE_AARCH64_LDR_LITERAL(1, LH_INS_OFFSET, 17));
+	LHStreamWrite64(&data, (size_t)(old_block + block_size));
 	
 	// Copy to rwx block
 	void *new_block = LHHookerAllocRwx(self, LHStreamTell(&code) + LHStreamTell(&data));
@@ -188,6 +219,7 @@ static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size
 	memcpy(new_block + LHStreamTell(&code), data.data, LHStreamTell(&data));
 	return new_block;
 }
+#endif // LH_AARCH64
 
 #undef LH_INS_OFFSET
 
