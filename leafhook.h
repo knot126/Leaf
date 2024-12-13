@@ -130,8 +130,10 @@ static void *LHHookerAllocRwx(LHHooker *self, size_t size) {
 	return ptr;
 }
 
+#define LH_STREAM_MAX_SIZE 0x100
+
 typedef struct LHStream {
-	uint8_t data[0x100];
+	uint8_t data[LH_STREAM_MAX_SIZE];
 	size_t head;
 } LHStream;
 
@@ -140,7 +142,7 @@ static void LHStreamInit(LHStream *self) {
 }
 
 static void LHStreamWrite(LHStream *self, size_t size, void *data) {
-	if (self->head + size > sizeof(self->data)) {
+	if (self->head + size > LH_STREAM_MAX_SIZE) {
 		// fail
 		return;
 	}
@@ -247,7 +249,7 @@ static void LHWriteAArch64LongJump(uint32_t *code, void *new_func) {
 
 static bool LHHookerAArch64Function(LHHooker *self, uint32_t *function, uint32_t *hook, uint32_t **orig) {
 	if (orig) {
-		uint32_t *orig_ptr = LHRewriteAArch64Block(self, function, 16);
+		uint32_t *orig_ptr = LHRewriteAArch64Block(self, function, 4);
 		
 		if (!orig_ptr) {
 			return false;
