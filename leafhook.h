@@ -47,23 +47,35 @@ bool LHHookerHookFunction(LHHooker *self, void *function, void *hook, void **ori
 #define MAKE_AARCH64_ADR(imm, Rd) ((((Rd) & 0x1f) << 0) | (((imm >> 2) & 0x7ffff) << 5) | (0b10000 << 24) | (((imm) & 0x3) << 29) | (0b0 << 31))
 #define AARCH64_ADR_DECODE_IMM(input) ((((input >> 29) & 0x3) << 0) | (((input >> 5) & 0x7ffff) << 2))
 #define AARCH64_ADR_DECODE_RD(input) ((((input >> 0) & 0x1f) << 0))
-
 #define IS_AARCH64_ADR(input) ((input & 0x9f000000) == 0x10000000)
 #define MAKE_AARCH64_ADRP(imm, Rd) ((((Rd) & 0x1f) << 0) | (((imm >> 2) & 0x7ffff) << 5) | (0b10000 << 24) | (((imm) & 0x3) << 29) | (0b1 << 31))
 #define AARCH64_ADRP_DECODE_IMM(input) ((((input >> 29) & 0x3) << 0) | (((input >> 5) & 0x7ffff) << 2))
 #define AARCH64_ADRP_DECODE_RD(input) ((((input >> 0) & 0x1f) << 0))
-
 #define IS_AARCH64_ADRP(input) ((input & 0x9f000000) == 0x90000000)
 #define MAKE_AARCH64_LDR_LITERAL(x, imm, Rt) ((((Rt) & 0x1f) << 0) | (((imm) & 0x7ffff) << 5) | (0b011000 << 24) | (((x) & 0x1) << 30) | (0b0 << 31))
 #define AARCH64_LDR_LITERAL_DECODE_X(input) ((((input >> 30) & 0x1) << 0))
 #define AARCH64_LDR_LITERAL_DECODE_IMM(input) ((((input >> 5) & 0x7ffff) << 0))
 #define AARCH64_LDR_LITERAL_DECODE_RT(input) ((((input >> 0) & 0x1f) << 0))
-
 #define IS_AARCH64_LDR_LITERAL(input) ((input & 0xbf000000) == 0x18000000)
 #define MAKE_AARCH64_BR(Rn) ((0b00000 << 0) | (((Rn) & 0x1f) << 5) | (0b1101011000011111000000 << 10))
 #define AARCH64_BR_DECODE_RN(input) ((((input >> 5) & 0x1f) << 0))
-
 #define IS_AARCH64_BR(input) ((input & 0xfffffc1f) == 0xd61f0000)
+#define MAKE_AARCH32_ADR(Rd, imm) ((((imm) & 0xfff) << 0) | (((Rd) & 0xf) << 12) | (0b1110001010001111 << 16))
+#define AARCH32_ADR_DECODE_RD(input) ((((input >> 12) & 0xf) << 0))
+#define AARCH32_ADR_DECODE_IMM(input) ((((input >> 0) & 0xfff) << 0))
+#define IS_AARCH32_ADR(input) ((input & 0xffff0000) == 0xe28f0000)
+#define MAKE_AARCH32_ADR_SUB(Rd, imm) ((((imm) & 0xfff) << 0) | (((Rd) & 0xf) << 12) | (0b1110001010001111 << 16))
+#define AARCH32_ADR_SUB_DECODE_RD(input) ((((input >> 12) & 0xf) << 0))
+#define AARCH32_ADR_SUB_DECODE_IMM(input) ((((input >> 0) & 0xfff) << 0))
+#define IS_AARCH32_ADR_SUB(input) ((input & 0xffff0000) == 0xe28f0000)
+#define MAKE_AARCH32_LDR_LITERAL(U, Rt, imm) ((((imm) & 0xfff) << 0) | (((Rt) & 0xf) << 12) | (0b0011111 << 16) | (((U) & 0x1) << 23) | (0b11100101 << 24))
+#define AARCH32_LDR_LITERAL_DECODE_U(input) ((((input >> 23) & 0x1) << 0))
+#define AARCH32_LDR_LITERAL_DECODE_RT(input) ((((input >> 12) & 0xf) << 0))
+#define AARCH32_LDR_LITERAL_DECODE_IMM(input) ((((input >> 0) & 0xfff) << 0))
+#define IS_AARCH32_LDR_LITERAL(input) ((input & 0xff7f0000) == 0xe51f0000)
+#define MAKE_AARCH32_BX(Rm) ((((Rm) & 0xf) << 0) | (0b1110000100101111111111110001 << 4))
+#define AARCH32_BX_DECODE_RM(input) ((((input >> 0) & 0xf) << 0))
+#define IS_AARCH32_BX(input) ((input & 0xfffffff0) == 0xe12fff10)
 // END AUTO GENERATED MACROS
 
 void *LHHookerMapRwxPages(size_t size) {
@@ -165,10 +177,15 @@ static size_t LHStreamTell(LHStream *self) {
 	return self->head;
 }
 
+#define LH_COPY_TO_NEW_BLOCK() void *new_block = LHHookerAllocRwx(self, LHStreamTell(&code) + LHStreamTell(&data)); \
+	memcpy(new_block, code.data, LHStreamTell(&code)); \
+	memcpy(new_block + LHStreamTell(&code), data.data, LHStreamTell(&data)); \
+	return new_block;
+
 #ifdef LH_AARCH64
 
 // Offset from next instruction to next available data region
-#define LH_INS_OFFSET (((block_size + 1) * sizeof(uint32_t)) - LHStreamTell(&code) + LHStreamTell(&data))
+#define LH_INS_OFFSET (((block_size + 2) * sizeof(uint32_t)) - LHStreamTell(&code) + LHStreamTell(&data))
 
 static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size_t block_size) {
 	/**
@@ -223,7 +240,7 @@ static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size
 			}
 		}
 		else {
-			LHStreamWrite32(&code, old_block[i]);
+			LHStreamWrite32(&code, ins);
 		}
 	}
 	
@@ -231,20 +248,18 @@ static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size
 	// TODO: Actually figure out which registers are available to use instead of
 	// just using x17
 	LHStreamWrite32(&code, MAKE_AARCH64_LDR_LITERAL(1, LH_INS_OFFSET, 17));
+	LHStreamWrite32(&code, MAKE_AARCH64_BR(17));
 	LHStreamWrite64(&data, (size_t)(old_block + block_size));
 	
 	// Copy to rwx block
-	void *new_block = LHHookerAllocRwx(self, LHStreamTell(&code) + LHStreamTell(&data));
-	memcpy(new_block, code.data, LHStreamTell(&code));
-	memcpy(new_block + LHStreamTell(&code), data.data, LHStreamTell(&data));
-	return new_block;
+	LH_COPY_TO_NEW_BLOCK;
 }
 
-static void LHWriteAArch64LongJump(uint32_t *code, void *new_func) {
+static void LHWriteAArch64LongJump(uint32_t *code, void *target) {
 	code[0] = MAKE_AARCH64_LDR_LITERAL(1, 8, 17);
 	code[1] = MAKE_AARCH64_BR(17);
-	code[2] = ((uint32_t *)&new_func)[0];
-	code[3] = ((uint32_t *)&new_func)[1];
+	code[2] = ((uint32_t *)&target)[0];
+	code[3] = ((uint32_t *)&target)[1];
 }
 
 static bool LHHookerAArch64Function(LHHooker *self, uint32_t *function, uint32_t *hook, uint32_t **orig) {
@@ -268,6 +283,82 @@ static bool LHHookerAArch64Function(LHHooker *self, uint32_t *function, uint32_t
 #endif // LH_AARCH64
 
 #ifdef LH_AARCH32
+
+// AArch32, so the PC points to (instruction + 8) for regular arm modea
+#define LH_INS_OFFSET (((block_size + 2) * sizeof(uint32_t)) - LHStreamTell(&code) + LHStreamTell(&data) - 8)
+#define LH_PC_VALUE_ALIGNED ((((uint32_t)&old_block[i]) + 8) & 0xfffffffc)
+
+uint32_t *LHRewriteAArch32Block(LHHooker *self, uint32_t *old_block, size_t block_size) {
+	/**
+	 * Rewrite a block of asm so that it is position indepedent (for our
+	 * purposes) and has a jump back to the old block at the end.
+	 */
+	
+	LHStream code; LHStreamInit(&code);
+	LHStream data; LHStreamInit(&data);
+	
+	for (size_t i = 0; i < block_size; i++) {
+		uint32_t ins = old_block[i];
+		
+		if (IS_AARCH32_ADR(ins)) {
+			uint32_t Rd = AARCH32_ADR_DECODE_RD(ins);
+			uint32_t imm = AARCH32_ADR_DECODE_IMM(ins);
+			
+			uint32_t result = LH_PC_VALUE_ALIGNED;
+			result += imm;
+			
+			LHStreamWrite32(&code, MAKE_AARCH32_LDR_LITERAL(1, 12, LH_INS_OFFSET));
+			LHStreamWrite32(&data, result);
+		}
+		else if (IS_AARCH32_ADR_SUB(ins)) {
+			uint32_t Rd = AARCH32_ADR_DECODE_RD(ins);
+			uint32_t imm = AARCH32_ADR_DECODE_IMM(ins);
+			
+			uint32_t result = LH_PC_VALUE_ALIGNED;
+			result -= imm;
+			
+			LHStreamWrite32(&code, MAKE_AARCH32_LDR_LITERAL(1, 12, LH_INS_OFFSET));
+			LHStreamWrite32(&data, result);
+		}
+		else if (IS_AARCH32_LDR_LITERAL(ins)) {
+			bool U = AARCH32_LDR_LITERAL_DECODE_U(ins);
+			uint32_t Rt = AARCH32_LDR_LITERAL_DECODE_RT(ins);
+			uint32_t imm = AARCH32_LDR_LITERAL_DECODE_IMM(ins);
+			
+			uint32_t word = LH_PC_VALUE_ALIGNED;
+			
+			if (U) {
+				word += imm;
+			}
+			else {
+				word -= imm;
+			}
+			
+			LHStreamWrite32(&code, MAKE_AARCH32_LDR_LITERAL(1, Rt, LH_INS_OFFSET));
+			LHStreamWrite32(&data, word);
+		}
+		else {
+			LHStreamWrite32(&code, ins);
+		}
+	}
+	
+	// Insert jump back to rest of function
+	LHStreamWrite32(&code, MAKE_AARCH32_LDR_LITERAL(1, 12, LH_INS_OFFSET));
+	LHStreamWrite32(&code, MAKE_AARCH32_BX(12));
+	LHStreamWrite32(&data, (uint32_t)(old_block + block_size));
+	
+	// Copy to rwx block
+	LH_COPY_TO_NEW_BLOCK;
+}
+
+void LHWriteAArch32LongJump(uint32_t *code, void *target) {
+	code[0] = MAKE_AARCH32_LDR_LITERAL(1, 12, 0);
+	code[1] = MAKE_AARCH32_BX(12);
+	code[2] = (uint32_t)target;
+}
+
+#undef LH_PC_VALUE_ALIGNED
+#undef LH_INS_OFFSET
 
 #endif
 

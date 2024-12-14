@@ -155,7 +155,7 @@ class Instr:
 			
 			s += "(" + " | ".join(l) + ")\n"
 		
-		return s
+		return s.rstrip()
 	
 	def getIsDefine(self):
 		p = 0

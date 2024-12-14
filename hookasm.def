@@ -2,7 +2,14 @@
 
 # <id: asm-name> (<bit> | ('<' <id: name> ':' <num: size> (':' <num: shift>)? '>'))+ <newline>
 
+# AArch64
 aarch64_adr 0<imm:2>10000<imm:19:2><Rd:5>
 aarch64_adrp 1<imm:2>10000<imm:19:2><Rd:5>
 aarch64_ldr_literal 0<x:1>011000<imm:19><Rt:5>
 aarch64_br 1101011000011111000000<Rn:5>00000
+
+# AArch32
+aarch32_adr 1110001010001111<Rd:4><imm:12>
+aarch32_adr_sub 1110001010001111<Rd:4><imm:12>
+aarch32_ldr_literal 11100101<U:1>0011111<Rt:4><imm:12>
+aarch32_bx 1110000100101111111111110001<Rm:4>
