@@ -207,7 +207,7 @@ static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size
 			size_t result = (size_t) (((void *)&old_block[i]) + imm);
 			size_t offset = LH_INS_OFFSET;
 			
-			LHStreamWrite32(&code, MAKE_AARCH64_LDR_LITERAL(1, offset, Rd));
+			LHStreamWrite32(&code, MAKE_AARCH64_LDR_LITERAL(1, offset >> 2, Rd));
 			LHStreamWrite64(&data, result);
 		}
 		else if (IS_AARCH64_ADRP(ins)) {
@@ -220,7 +220,7 @@ static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size
 			result += imm;
 			size_t offset = LH_INS_OFFSET;
 			
-			LHStreamWrite32(&code, MAKE_AARCH64_LDR_LITERAL(1, offset, Rd));
+			LHStreamWrite32(&code, MAKE_AARCH64_LDR_LITERAL(1, offset >> 2, Rd));
 			LHStreamWrite64(&data, result);
 		}
 		else if (IS_AARCH64_LDR_LITERAL(ins)) {
@@ -228,7 +228,7 @@ static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size
 			uint32_t Rt = AARCH64_LDR_LITERAL_DECODE_RT(ins);
 			size_t imm = LH_SEXT64(AARCH64_LDR_LITERAL_DECODE_IMM(ins), 19) << 2;
 			
-			LHStreamWrite32(&code, MAKE_AARCH64_LDR_LITERAL(x, LH_INS_OFFSET, Rt));
+			LHStreamWrite32(&code, MAKE_AARCH64_LDR_LITERAL(x, LH_INS_OFFSET >> 2, Rt));
 			
 			if (x) {
 				uint64_t d = ((uint64_t *)(((void *)&old_block[i]) + imm))[i];
@@ -247,17 +247,17 @@ static uint32_t *LHRewriteAArch64Block(LHHooker *self, uint32_t *old_block, size
 	// Insert jump back to end
 	// TODO: Actually figure out which registers are available to use instead of
 	// just using x17
-	LHStreamWrite32(&code, MAKE_AARCH64_LDR_LITERAL(1, LH_INS_OFFSET, 17));
-	LHStreamWrite32(&code, MAKE_AARCH64_BR(17));
+	LHStreamWrite32(&code, MAKE_AARCH64_LDR_LITERAL(1, LH_INS_OFFSET >> 2, 16));
+	LHStreamWrite32(&code, MAKE_AARCH64_BR(16));
 	LHStreamWrite64(&data, (size_t)(old_block + block_size));
 	
 	// Copy to rwx block
-	LH_COPY_TO_NEW_BLOCK;
+	LH_COPY_TO_NEW_BLOCK();
 }
 
 static void LHWriteAArch64LongJump(uint32_t *code, void *target) {
-	code[0] = MAKE_AARCH64_LDR_LITERAL(1, 8, 17);
-	code[1] = MAKE_AARCH64_BR(17);
+	code[0] = MAKE_AARCH64_LDR_LITERAL(1, 8 >> 2, 16);
+	code[1] = MAKE_AARCH64_BR(16);
 	code[2] = ((uint32_t *)&target)[0];
 	code[3] = ((uint32_t *)&target)[1];
 }
@@ -348,13 +348,29 @@ uint32_t *LHRewriteAArch32Block(LHHooker *self, uint32_t *old_block, size_t bloc
 	LHStreamWrite32(&data, (uint32_t)(old_block + block_size));
 	
 	// Copy to rwx block
-	LH_COPY_TO_NEW_BLOCK;
+	LH_COPY_TO_NEW_BLOCK();
 }
 
 void LHWriteAArch32LongJump(uint32_t *code, void *target) {
 	code[0] = MAKE_AARCH32_LDR_LITERAL(1, 12, 0);
 	code[1] = MAKE_AARCH32_BX(12);
 	code[2] = (uint32_t)target;
+}
+
+static bool LHHookerAArch32Function(LHHooker *self, uint32_t *function, uint32_t *hook, uint32_t **orig) {
+	if (orig) {
+		uint32_t *orig_ptr = LHRewriteAArch32Block(self, function, 3);
+		
+		if (!orig_ptr) {
+			return false;
+		}
+		
+		orig[0] = orig_ptr;
+	}
+	
+	LHWriteAArch32LongJump(function, hook);
+	
+	return true;
 }
 
 #undef LH_PC_VALUE_ALIGNED
@@ -372,7 +388,7 @@ bool LHHookerHookFunction(LHHooker *self, void *function, void *hook, void **ori
 	bool success = false;
 #ifdef LH_AARCH64
 	success = LHHookerAArch64Function(self, function, hook, (uint32_t **) orig);
-#elif LH_AARCH32
+#elif defined(LH_AARCH32)
 	success = LHHookerAArch32Function(self, function, hook, (uint32_t **) orig);
 #endif
 	return success;
