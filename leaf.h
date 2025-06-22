@@ -258,7 +258,8 @@ static void *LeafMakeMap(size_t size, size_t alignment) {
 	 * 
 	 * Sadly there is no way (that I know of) to directly request aligned pages,
 	 * so the next best solution is used: allocated more than is needed and trim
-	 * off the unneeded parts using munmap().
+	 * off the unneeded parts using munmap(). Even the Android ELF loader uses
+	 * this trick, so I think it's not all that jank at the end of things.
 	 */
 	
 	// Size required if we need to always get at least size bytes of aligned
