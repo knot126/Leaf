@@ -142,8 +142,6 @@ void LeafFree(Leaf *self);
 	#define LOG(...)
 #endif
 
-#define LEAF_IN_RANGE(A, X, B) ((X >= A) && (X <= B))
-
 static LeafStream *LeafStreamInit(uint8_t *buffer, size_t size) {
 	/**
 	 * Makes a read stream around the given buffer
@@ -240,8 +238,8 @@ Leaf *LeafInit(void) {
 	return self;
 }
 
-#define LEAF_ALIGN_UP(ADDR, ALIGN) (ADDR + (ALIGN - (ADDR % ALIGN)))
-#define LEAF_ALIGN_DOWN(ADDR, ALIGN) (ADDR - (ADDR % ALIGN))
+#define LEAF_ALIGN_UP(ADDR, ALIGN) ((ADDR) + ((ALIGN) - ((ADDR) % (ALIGN))))
+#define LEAF_ALIGN_DOWN(ADDR, ALIGN) ((ADDR) - ((ADDR) % (ALIGN)))
 
 static void *LeafMakeMap(size_t size, size_t alignment) {
 	/**
@@ -258,7 +256,7 @@ static void *LeafMakeMap(size_t size, size_t alignment) {
 	const size_t req_size = size + alignment;
 	
 	// Map memory
-	const void *addr = (size_t) mmap(NULL, req_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	void * const addr = mmap(NULL, req_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	
 	if (addr == MAP_FAILED) {
 		return MAP_FAILED;
@@ -285,21 +283,27 @@ static void *LeafMakeMap(size_t size, size_t alignment) {
 		munmap((void *) (end_addr - trim_after), trim_after);
 	}
 	
+	LOG("Map: Start=0x%zx End=0x%zx Aligned=0x%zx TrimBefore=0x%zx TrimAfter=0x%zx\n", start_addr, end_addr, aligned_addr, trim_before, trim_after);
+	
+	*((int *) aligned_addr) = 0;
+	
 	// Finally return aligned address
 	return (void *) aligned_addr;
 }
 
-static void *LeafGetRealAddr(Leaf *self, size_t base_addr) {
+#define LEAF_IN_RANGE(A, X, B) ((X >= A) && (X < B))
+
+static void *LeafGetRealAddr(Leaf *self, size_t virt_addr) {
 	/**
 	 * Get the loaded address for a given virtual address in the binary.
 	 */
 	
-	const size_t orig = self->segments[i].orig_addr;
-	const size_t size = self->segments[i].orig_addr + self->segments[i].size;
-	
 	for (size_t i = 0; i < self->segment_count; i++) {
-		if (LEAF_IN_RANGE(orig, base_addr, size)) {
-			return self->segments[i].addr + base_addr;
+		const size_t start = self->segments[i].orig_addr;
+		const size_t end = self->segments[i].orig_addr + self->segments[i].size;
+		
+		if (LEAF_IN_RANGE(start, virt_addr, end)) {
+			return self->segments[i].addr + (virt_addr - self->segments[i].orig_addr);
 		}
 	}
 	
@@ -400,8 +404,9 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	LeafDyn *dyns = NULL;
 	
 	for (size_t i = 0, j = 0; i < phnum; i++) {
+		LeafPhdr *phdr = self->phdrs[i];
+		
 		if (self->phdrs[i]->p_type == PT_LOAD) {
-			LeafPhdr *phdr = &self->phdrs[i];
 			LeafLoadedSegment *seg = &self->segments[j];
 			
 			// Mind that for Leaf we ignore the flags (permissions) and always
@@ -411,13 +416,15 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 			seg->size = phdr->p_memsz;
 			seg->orig_addr = phdr->p_vaddr;
 			
-			if (!seg->addr == MAP_FAILED) {
+			if (seg->addr == MAP_FAILED) {
 				return strerror(errno);
 			}
 			
 			// Load segment contents, or at least the ones we're supposed to
 			LeafStreamSetpos(stream, phdr->p_offset);
 			LeafStreamReadInto(stream, phdr->p_filesz, seg->addr);
+			
+			LOG("Section %zu  Addr=%p Size=0x%zx OrigAddr=0x%zx End=%p\n", j, seg->addr, seg->size, seg->orig_addr, seg->addr + seg->size);
 			
 			j++;
 		}
@@ -462,7 +469,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	for (size_t i = 0; dyns[i].d_tag != DT_NULL; i++) {
 		switch (dyns[i].d_tag) {
 			case DT_NEEDED: {
-				LOG("Leaf: DT_NEEDED 0x%zx\n", dyns[i].d_un.d_val);
+				LOG("Leaf: DT_NEEDED 0x%zx\n", (size_t)dyns[i].d_un.d_val);
 				// TODO: check if it fails
 				self->dl_handles = realloc(self->dl_handles, (self->dl_handle_count + 1) * sizeof *self->dl_handles);
 				self->dl_handles[self->dl_handle_count] = (void *) dyns[i].d_un.d_ptr; // we will fix the pointers later
@@ -551,7 +558,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				break;
 			}
 			default: {
-				LOG("Unknown dynamic section entry: 0x%zx\n", dyns[i].d_tag);
+				LOG("Unknown dynamic section entry: 0x%zx\n", (size_t)dyns[i].d_tag);
 				break;
 			}
 		}
@@ -648,7 +655,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 			}
 			default: {
 				// not a special case, just relocate to it's loaded address
-				sym->st_value = LeafGetRealAddr(self, sym->st_value);
+				sym->st_value = (Elf32_Addr) LeafGetRealAddr(self, sym->st_value);
 				break;
 			}
 		}
@@ -714,6 +721,7 @@ void LeafDoRela(Leaf *self, LeafRela *relocs, size_t reloc_count) {
 			// TODO other arches
 #ifdef __aarch64__
 			case R_AARCH64_RELATIVE: {
+				// LOG("R_AARCH64_RELATIVE 0x%zx 0x%zx\n", (size_t)rela->r_offset, (size_t)rela->r_addend);
 				// I think this works (?) since all symbols are zero in my case.
 				void *result = LeafGetRealAddr(self, rela->r_addend);
 				*((void **)where) = result;
@@ -721,13 +729,14 @@ void LeafDoRela(Leaf *self, LeafRela *relocs, size_t reloc_count) {
 			}
 			case R_AARCH64_GLOB_DAT:
 			case R_AARCH64_JUMP_SLOT: {
+				// LOG("R_AARCH64_GLOB_DAT/R_AARCH64_JUMP_SLOT 0x%zx 0x%zx\n", (size_t)rela->r_offset, (size_t)rela->r_addend);
 				LeafSym *sym = &self->symtab[LeafRelocSym(rela->r_info)];
 				*((size_t *)where) = sym->st_value + rela->r_addend;
 				break;
 			}
 #endif
 			default: {
-				LOG("Unknown reloc type: offset=0x%zx sym=0x%zx type=0x%zx addend=0x%zx\n", rela->r_offset, LeafRelocSym(rela->r_info), LeafRelocType(rela->r_info), rela->r_addend);
+				LOG("Unknown reloc type: offset=0x%zx sym=0x%zx type=0x%zx addend=0x%zx\n", (size_t)rela->r_offset, (size_t)LeafRelocSym(rela->r_info), (size_t)LeafRelocType(rela->r_info), (size_t)rela->r_addend);
 				break;
 			}
 		}
@@ -787,7 +796,7 @@ void LeafDoRel(Leaf *self, LeafRel *relocs, size_t reloc_count) {
 			}
 #endif
 			default: {
-				LOG("Unknown reloc type: offset=0x%zx sym=0x%zx type=0x%zx\n", rel->r_offset, LeafRelocSym(rel->r_info), LeafRelocType(rel->r_info));
+				LOG("Unknown reloc type: offset=0x%zx sym=0x%zx type=0x%zx\n", (size_t)rel->r_offset, (size_t)LeafRelocSym(rel->r_info), (size_t)LeafRelocType(rel->r_info));
 				break;
 			}
 		}
@@ -879,7 +888,7 @@ void LeafFinish(Leaf *self) {
 	 * with a global variable.
 	 */
 	
-	LOG("Calling %d fini functions...", self->fini_count);
+	LOG("Calling %zu fini functions...", self->fini_count);
 	
 	// remember: run them backwards
 	for (size_t i = 1; i <= self->fini_count; i++) {
