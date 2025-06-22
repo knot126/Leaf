@@ -82,8 +82,18 @@ typedef struct Leaf {
 	LeafPhdr **phdrs;
 	
 	// Segments of the program
+	// 
+	// Originally to implement loading things aligned I was going to load
+	// segments sparsely, but it seems like that doesn't work with SH. I'm not
+	// sure if that's actually conformant to the ELF spec since both sections
+	// really.
 	LeafLoadedSegment *segments;
 	size_t segment_count;
+	
+#ifndef LEAF_LOAD_SPARSE
+	void *block;
+	size_t block_size;
+#endif
 	
 	// dlopen() handles for libs required by this ELF
 	void **dl_handles;
@@ -402,11 +412,16 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	
 	// Initialise segment structures, map memory and load segments
 	LeafDyn *dyns = NULL;
+#ifndef LEAF_LOAD_SPARSE
+	size_t max_vaddr = 0;
+	size_t max_align = 0;
+#endif
 	
 	for (size_t i = 0, j = 0; i < phnum; i++) {
 		LeafPhdr *phdr = self->phdrs[i];
 		
 		if (self->phdrs[i]->p_type == PT_LOAD) {
+#ifdef LEAF_LOAD_SPARSE
 			LeafLoadedSegment *seg = &self->segments[j];
 			
 			// Mind that for Leaf we ignore the flags (permissions) and always
@@ -427,6 +442,10 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 			LOG("Section %zu  Addr=%p Size=0x%zx OrigAddr=0x%zx End=%p\n", j, seg->addr, seg->size, seg->orig_addr, seg->addr + seg->size);
 			
 			j++;
+#else
+			max_vaddr = ((phdr->p_vaddr + phdr->p_memsz) > max_vaddr) ? (phdr->p_vaddr + phdr->p_memsz) : max_vaddr;
+			max_align = (phdr->p_align > max_align) ? phdr->p_align : max_align;
+#endif
 		}
 		else if (phdr->p_type == PT_DYNAMIC) {
 			// TODO: I'd like to actually load the dynamic segment into
@@ -436,6 +455,41 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 		}
 	}
 	
+#ifndef LEAF_LOAD_SPARSE
+	LOG("Non sparse : LeafMakeMap(size=0x%zx, align=0x%zx)\n", max_vaddr, max_align);
+	
+	self->block_size = max_vaddr;
+	self->block = LeafMakeMap(max_vaddr, max_align);
+	
+	if (self->block == MAP_FAILED) {
+		return "Non sparse block allocation failed";
+	}
+	
+	// *sigh* I don't really want to loop over everything a third goddamn time,
+	// but I've been forced here. I was originally going to implement "spare"
+	// section loading, so that both sections were loaded at 64K boundaries, but
+	// it seems like Smash Hit does not contain information to relocate most
+	// references properly...
+	for (size_t i = 0, j = 0; i < phnum; i++) {
+		LeafPhdr *phdr = self->phdrs[i];
+		
+		if (self->phdrs[i]->p_type == PT_LOAD) {
+			LeafLoadedSegment *seg = &self->segments[j];
+			
+			seg->addr = self->block + phdr->p_vaddr;
+			seg->size = phdr->p_memsz;
+			seg->orig_addr = phdr->p_vaddr;
+			
+			LOG("Segment %zu  Addr=%p Size=0x%zx OrigAddr=0x%zx\n", j, seg->addr, seg->size, seg->orig_addr);
+			
+			// Load segment contents, or at least the ones we're supposed to
+			LeafStreamSetpos(stream, phdr->p_offset);
+			LeafStreamReadInto(stream, phdr->p_filesz, seg->addr);
+			
+			j++;
+		}
+	}
+#endif
 	
 	if (!dyns) {
 		return "Failed to find dynamic info";
@@ -557,6 +611,9 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				fini_array_size = dyns[i].d_un.d_val;
 				break;
 			}
+			case DT_SONAME: {
+				break;
+			}
 			default: {
 				LOG("Unknown dynamic section entry: 0x%zx\n", (size_t)dyns[i].d_tag);
 				break;
@@ -655,7 +712,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 			}
 			default: {
 				// not a special case, just relocate to it's loaded address
-				sym->st_value = (Elf32_Addr) LeafGetRealAddr(self, sym->st_value);
+				sym->st_value = (LeafAddr) LeafGetRealAddr(self, sym->st_value);
 				break;
 			}
 		}
@@ -927,10 +984,14 @@ void LeafFree(Leaf *self) {
 	free(self->phdrs);
 	
 	// Unmap segments and info structures
+#ifdef LEAF_LOAD_SPARSE
 	for (size_t i = 0; i < self->segment_count; i++) {
 		LeafLoadedSegment *s = &self->segments[i];
 		munmap(s->addr, s->size);
 	}
+#else
+	munmap(self->block, self->block_size);
+#endif
 	
 	free(self->segments);
 	
