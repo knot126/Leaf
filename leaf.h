@@ -1,9 +1,34 @@
 /**
- * Leaf - a single header ELF loader.
+ * Leaf, a single header ELF loader. Supports 32-bit and 64-bit ARM, as well as
+ * 32-bit x86. Always loads sections as RWX. Primarily targets Android, should
+ * also work on GNU/Linux.
+ * 
+ * ****************************************************************************
+ * 
+ * Copyright (C) 2024 - 2025 Knot126
+ * 
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the “Software”), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ * 
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ * 
+ * THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
  */
 
 #ifndef LEAF_HEADER
 #define LEAF_HEADER
+
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,16 +69,46 @@
 #define LeafSymBind(i) (i >> 4)
 #define LeafSymType(i) (i & 0xf)
 
+typedef struct LeafLoadedSegment {
+	void *addr;
+	size_t orig_addr;
+	size_t size;
+} LeafLoadedSegment;
+
 typedef struct Leaf {
+	// Headers
 	LeafEhdr *ehdr;
 	LeafPhdr **phdrs;
-	void *blob;
-	size_t blob_length;
+	
+	// Segments of the program
+	LeafLoadedSegment *segments;
+	size_t segment_count;
+	
+	// dlopen() handles for libs required by this ELF
 	void **dl_handles;
 	size_t dl_handle_count;
+	
+	// Pointer to string and symbol table in the loaded binary
 	const char *strtab;
 	LeafSym *symtab;
 	size_t sym_count;
+	
+	// Relocations and PLT relocations
+	size_t reloc_types;
+	
+	void *relocs;
+	size_t reloc_count;
+	size_t reloc_ent_size;
+	
+	void *plt_relocs;
+	size_t plt_reloc_count;
+	
+	// Init function array (not needed by the loader after loading, but kept for
+	// reference)
+	void **init_array;
+	size_t init_count;
+	
+	// Finialisation function array
 	void **fini_array;
 	size_t fini_count;
 } Leaf;
@@ -69,9 +124,26 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length);
 const char *LeafLoadFromFile(Leaf *self, const char *path);
 void *LeafSymbolAddr(Leaf *self, const char *symbol_name);
 LeafSym *LeafSymbolInfo(Leaf *self, const char *symbol_name);
+void *LeafBlobPtr(Leaf *self, size_t offset);
+size_t LeafBlobLength(Leaf *self);
 void LeafFree(Leaf *self);
 
 #ifdef LEAF_IMPLEMENTATION
+
+// Logging stuff dependent on platform
+#ifndef LEAF_NO_LOGGING
+	#ifdef __ANDROID__
+		#include <android/log.h>
+		#define LOG(...) __android_log_print(ANDROID_LOG_INFO, "Leaf", __VA_ARGS__)
+	#else
+		#include <stdio.h>
+		#define LOG(...) fprintf(stderr, __VA_ARGS__);
+	#endif
+#else
+	#define LOG(...)
+#endif
+
+#define LEAF_IN_RANGE(A, X, B) ((X >= A) && (X <= B))
 
 static LeafStream *LeafStreamInit(uint8_t *buffer, size_t size) {
 	/**
@@ -145,7 +217,7 @@ static void LeafStreamFree(LeafStream *self) {
 // Stub functions
 /////////////////
 static int Leaf__cxa_atexit(void (*func)(void *), void *arg, void *dso_handle) {
-	printf("__cxa_atexit(<%p>, <%p>, <%p>)", func, arg, dso_handle);
+	LOG("__cxa_atexit(<%p>, <%p>, <%p>)", func, arg, dso_handle);
 	return 0;
 }
 
@@ -169,14 +241,32 @@ Leaf *LeafInit(void) {
 	return self;
 }
 
-static void *LeafMakeMap(size_t size) {
+static void *LeafMakeMap(size_t size, size_t alignment) {
 	return mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 }
 
-uint8_t ELF_SIGNATURE[] = {0x7f, 'E', 'L', 'F'};
+static void *LeafGetRealAddr(Leaf *self, size_t base_addr) {
+	/**
+	 * Get the loaded address for a given virtual address in the binary.
+	 */
+	
+	const size_t orig = self->segments[i].orig_addr;
+	const size_t size = self->segments[i].orig_addr + self->segments[i].size;
+	
+	for (size_t i = 0; i < self->segment_count; i++) {
+		if (LEAF_IN_RANGE(orig, base_addr, size)) {
+			return self->segments[i].addr + base_addr;
+		}
+	}
+	
+	return NULL;
+}
+
+const uint8_t ELF_SIGNATURE[] = {0x7f, 'E', 'L', 'F'};
 
 void LeafDoRela(Leaf *self, LeafRela *relocs, size_t reloc_count);
 void LeafDoRel(Leaf *self, LeafRel *relocs, size_t reloc_count);
+static void LeafDoInit(Leaf *self);
 
 const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	/**
@@ -243,48 +333,91 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 		self->phdrs[i] = phdr;
 	}
 	
-	// Determine how much memory we need to map based on loadable segment sizes
-	// since base address == 0 for ET_DYN we can just use the highest VirtAddr
-	// + MemSiz value
-	size_t highest = 0;
+// 	// Determine how much memory we need to map based on loadable segment sizes
+// 	// since base address == 0 for ET_DYN we can just use the highest VirtAddr
+// 	// + MemSiz value
+// 	size_t highest = 0;
+// 	
+// 	for (size_t i = 0; i < phnum; i++) {
+// 		if (self->phdrs[i]->p_type == PT_LOAD) {
+// 			// don't need to check if its larger, PT_LOAD's should be sorted
+// 			// by p_vaddr from low->high
+// 			highest = self->phdrs[i]->p_vaddr + self->phdrs[i]->p_memsz;
+// 		}
+// 	}
+// 	
+// 	LOG("leaf: highest value = 0x%zx, mapping...\n", highest);
+// 	
+// 	// Map memory for loadable segments, copy their contents
+// 	self->blob = LeafMakeMap(highest);
+// 	self->blob_length = highest;
+// 	
+// 	if (self->blob == MAP_FAILED) {
+// 		return strerror(errno);
+// 	}
+	
+	// Count the number of LOAD headers (actual segments) so we can malloc()
+	// the array of segment info structures.
+	size_t segment_count = 0;
 	
 	for (size_t i = 0; i < phnum; i++) {
 		if (self->phdrs[i]->p_type == PT_LOAD) {
-			// don't need to check if its larger, PT_LOAD's should be sorted
-			// by p_vaddr from low->high
-			highest = self->phdrs[i]->p_vaddr + self->phdrs[i]->p_memsz;
+			segment_count++;
 		}
 	}
 	
-	printf("leaf: highest value = 0x%zx, mapping...\n", highest);
+	self->segment_count = segment_count;
 	
-	// Map memory for loadable segments, copy their contents
-	self->blob = LeafMakeMap(highest);
-	self->blob_length = highest;
+	// Allocate memory for storing segment structures
+	self->segments = malloc(segment_count * sizeof *self->segments);
 	
-	if (self->blob == MAP_FAILED) {
-		return strerror(errno);
+	if (!self->segments) {
+		return "Failed to allocate memory for segment information";
 	}
 	
-	// load code, data, etc and also find location of dynamic symbol table
-	printf("leaf: mapped at <%p>, copying...\n", self->blob);
-	
+	// Initialise segment structures, map memory and load segments
 	LeafDyn *dyns = NULL;
 	
-	for (size_t i = 0; i < phnum; i++) {
-		LeafPhdr *phdr = self->phdrs[i];
-		
-		if (phdr->p_type == PT_LOAD) {
-			LeafStreamSetpos(stream, phdr->p_offset);
-			LeafStreamReadInto(stream, phdr->p_filesz, self->blob + phdr->p_vaddr);
+	for (size_t i = 0, j = 0; i < phnum; i++) {
+		if (self->phdrs[i]->p_type == PT_LOAD) {
+			LeafPhdr *phdr = &self->phdrs[i];
+			
+			// Mind that for Leaf we ignore p_map
+			self->segments[j].addr = LeafMakeMap(phdr->p_memsz, phdr->p_align);
+			self->segments[j].size = phdr->p_memsz;
+			self->segments[j].orig_addr = phdr->p_vaddr;
+			
+			if (!self->segments[j].addr == MAP_FAILED) {
+				return strerror(errno);
+			}
+			
+			j++;
 		}
 		else if (phdr->p_type == PT_DYNAMIC) {
 			LeafStreamSetpos(stream, phdr->p_offset);
 			dyns = LeafStreamGetptr(stream);
 		}
-		// I think we can ignore the PT_GNU_STACK and PT_GNU_RELRO, but maybe
-		// not PT_GNU_EH_FRAME ?
 	}
+	
+	// load code, data, etc and also find location of dynamic symbol table
+// 	LOG("leaf: mapped at <%p>, copying...\n", self->blob);
+// 	
+// 	LeafDyn *dyns = NULL;
+// 	
+// 	for (size_t i = 0; i < phnum; i++) {
+// 		LeafPhdr *phdr = self->phdrs[i];
+// 		
+// 		if (phdr->p_type == PT_LOAD) {
+// 			LeafStreamSetpos(stream, phdr->p_offset);
+// 			LeafStreamReadInto(stream, phdr->p_filesz, self->blob + phdr->p_vaddr);
+// 		}
+// 		else if (phdr->p_type == PT_DYNAMIC) {
+// 			LeafStreamSetpos(stream, phdr->p_offset);
+// 			dyns = LeafStreamGetptr(stream);
+// 		}
+// 		// I think we can ignore the PT_GNU_STACK and PT_GNU_RELRO, but maybe
+// 		// not PT_GNU_EH_FRAME ?
+// 	}
 	
 	if (!dyns) {
 		return "Failed to find dynamic info";
@@ -299,11 +432,11 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	
 	size_t reloc_types; // HACK the entire handling of reloc types is hacky
 	
-	LeafRela *relocs = NULL;
+	void *relocs = NULL;
 	size_t reloc_size;
 	size_t reloc_ent_size;
 	
-	LeafRela *plt_relocs = NULL;
+	void *plt_relocs = NULL;
 	size_t plt_relocs_size;
 	
 	LeafSym *symtab = NULL;
@@ -319,7 +452,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	for (size_t i = 0; dyns[i].d_tag != DT_NULL; i++) {
 		switch (dyns[i].d_tag) {
 			case DT_NEEDED: {
-				printf("Leaf: DT_NEEDED 0x%zx\n", dyns[i].d_un.d_val);
+				LOG("Leaf: DT_NEEDED 0x%zx\n", dyns[i].d_un.d_val);
 				// TODO: check if it fails
 				self->dl_handles = realloc(self->dl_handles, (self->dl_handle_count + 1) * sizeof *self->dl_handles);
 				self->dl_handles[self->dl_handle_count] = (void *) dyns[i].d_un.d_ptr; // we will fix the pointers later
@@ -363,7 +496,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				break;
 			}
 			case DT_SYMBOLIC: {
-				printf("Leaf: DT_SYMBOLIC\n");
+				LOG("Leaf: DT_SYMBOLIC\n");
 				break;
 			}
 			case DT_REL: {
@@ -379,13 +512,10 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				break;
 			}
 			case DT_BIND_NOW: {
-				printf("Leaf: DT_BIND_NOW\n");
+				LOG("Leaf: DT_BIND_NOW\n");
 				break;
 			}
 			case DT_PLTREL: {
-				// if (dyns[i].d_un.d_val != DT_RELA) {
-				// 	return "Using ElfXX_Rel instead of ElfX_Rela for PLT is not supported";
-				// }
 				reloc_types = dyns[i].d_un.d_val;
 				break;
 			}
@@ -410,7 +540,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				break;
 			}
 			default: {
-				printf("Unknown dynamic section entry: 0x%zx\n", dyns[i].d_tag);
+				LOG("Unknown dynamic section entry: 0x%zx\n", dyns[i].d_tag);
 				break;
 			}
 		}
@@ -428,6 +558,19 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	self->strtab = strtab;
 	self->symtab = symtab;
 	self->sym_count = sym_count;
+	
+	self->reloc_types = reloc_types;
+	
+	self->relocs = plt_relocs;
+	self->reloc_count = reloc_size / reloc_ent_size;
+	self->reloc_ent_size = reloc_ent_size;
+	
+	self->plt_relocs = plt_relocs;
+	self->plt_reloc_count = plt_relocs_size / reloc_ent_size;
+	
+	self->init_array = init_array;
+	self->init_count = init_array_size / sizeof(void *);
+	
 	self->fini_array = fini_array;
 	self->fini_count = fini_array_size / sizeof(void *);
 	
@@ -438,16 +581,18 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	
 	// Load dependent libraries
 	for (size_t i = 0; i < self->dl_handle_count; i++) {
-		printf("Dep lib soname: %s\n", (char *)self->dl_handles[i]);
+		LOG("Dep lib soname: %s\n", (char *)self->dl_handles[i]);
+		
 		self->dl_handles[i] = dlopen(self->dl_handles[i], RTLD_NOW | RTLD_GLOBAL);
+		
 		if (!self->dl_handles[i]) {
-			printf("Loading lib failed! Continuing anyways...\n");
+			LOG("Loading lib failed! Continuing anyways...\n");
 		}
 	}
 	
 	// Reloc everything in symbol table, load external symbols
 	// TODO
-	printf("Have %zd symbols, fixing up symbol table...\n", sym_count);
+	LOG("Have %zd symbols, fixing up symbol table...\n", sym_count);
 	
 	for (size_t i = 1; i < sym_count; i++) {
 		LeafSym *sym = &symtab[i];
@@ -459,7 +604,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				break;
 			}
 			case SHN_COMMON: {
-				printf("Symbol with SHN_COMMON, is this the 90s!?\n");
+				LOG("Symbol with SHN_COMMON, is this the 90s!?\n");
 				break;
 			}
 			case SHN_UNDEF: {
@@ -482,10 +627,10 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				}
 				
 				if (sym->st_value) {
-					// printf("Found symbol '%s' at <0x%zx>\n", symbol_name, sym->st_value);
+					// LOG("Found symbol '%s' at <0x%zx>\n", symbol_name, sym->st_value);
 				}
 				else {
-					printf("Warning: External symbol named '%s' not found.\n", symbol_name);
+					LOG("Warning: External symbol named '%s' not found.\n", symbol_name);
 				}
 				
 				break;
@@ -506,20 +651,20 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 		p_cxa_atexit_sym->st_value = (size_t) &Leaf__cxa_atexit;
 	}
 	else {
-		printf("Symbol __cxa_atexit not found for replacement\n");
+		LOG("Symbol __cxa_atexit not found for replacement\n");
 	}
 	
 	if (p_aeabi_atexit_sym) {
 		p_aeabi_atexit_sym->st_value = (size_t) &Leaf__cxa_atexit;
 	}
 	else {
-		printf("Symbol __aeabi_atexit not found for replacement\n");
+		LOG("Symbol __aeabi_atexit not found for replacement\n");
 	}
 	
 	// debug: basic dump of symbol table
-	// printf("symbol table after relocs:\n");
+	// LOG("symbol table after relocs:\n");
 	// for (size_t i = 0; i < sym_count; i++) {
-	// 	printf("[%04zu] 0x%016zx %s\n", i, symtab[i].st_value, strtab + symtab[i].st_name);
+	// 	LOG("[%04zu] 0x%016zx %s\n", i, symtab[i].st_value, strtab + symtab[i].st_name);
 	// }
 	
 	// Preform relocations
@@ -527,33 +672,20 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	size_t plt_reloc_count = plt_relocs_size / reloc_ent_size;
 	
 	if (reloc_types == DT_RELA) {
-		printf("Will preform %zu relocations (DT_RELA)...\n", reloc_count);
+		LOG("Will preform %zu relocations (DT_RELA)...\n", reloc_count);
 		LeafDoRela(self, relocs, reloc_count);
-		printf("Will preform %zu relocations (DT_JMPREL)...\n", plt_reloc_count);
+		LOG("Will preform %zu relocations (DT_JMPREL)...\n", plt_reloc_count);
 		LeafDoRela(self, plt_relocs, plt_reloc_count);
 	}
 	else {
-		printf("Will preform %zu relocations (DT_REL)...\n", reloc_count);
-		LeafDoRel(self, (LeafRel*) relocs, reloc_count);
-		printf("Will preform %zu relocations (DT_JMPREL)...\n", plt_reloc_count);
-		LeafDoRel(self, (LeafRel*) plt_relocs, plt_reloc_count);
+		LOG("Will preform %zu relocations (DT_REL)...\n", reloc_count);
+		LeafDoRel(self, relocs, reloc_count);
+		LOG("Will preform %zu relocations (DT_JMPREL)...\n", plt_reloc_count);
+		LeafDoRel(self, plt_relocs, plt_reloc_count);
 	}
 	
 	// Call init functions
-	// TODO
-	size_t init_count = init_array_size / sizeof(void *);
-	
-	printf("Calling %zu init functions...\n", init_count);
-	
-	for (size_t i = 0; i < init_count; i++) {
-		void (*func)(void) = ((void(**)(void)) init_array)[i];
-		
-		printf("Func addr: <%p>\n", func);
-		
-		if (func) {
-			func();
-		}
-	}
+	LeafDoInit(self);
 	
 	LeafStreamFree(stream); // TODO free if it fails
 	
@@ -583,7 +715,7 @@ void LeafDoRela(Leaf *self, LeafRela *relocs, size_t reloc_count) {
 			}
 #endif
 			default: {
-				printf("Unknown reloc type: offset=0x%zx sym=0x%zx type=0x%zx addend=0x%zx\n", rela->r_offset, LeafRelocSym(rela->r_info), LeafRelocType(rela->r_info), rela->r_addend);
+				LOG("Unknown reloc type: offset=0x%zx sym=0x%zx type=0x%zx addend=0x%zx\n", rela->r_offset, LeafRelocSym(rela->r_info), LeafRelocType(rela->r_info), rela->r_addend);
 				break;
 			}
 		}
@@ -643,9 +775,23 @@ void LeafDoRel(Leaf *self, LeafRel *relocs, size_t reloc_count) {
 			}
 #endif
 			default: {
-				printf("Unknown reloc type: offset=0x%zx sym=0x%zx type=0x%zx\n", rel->r_offset, LeafRelocSym(rel->r_info), LeafRelocType(rel->r_info));
+				LOG("Unknown reloc type: offset=0x%zx sym=0x%zx type=0x%zx\n", rel->r_offset, LeafRelocSym(rel->r_info), LeafRelocType(rel->r_info));
 				break;
 			}
+		}
+	}
+}
+
+void LeafDoInit(Leaf *self) {
+	LOG("Calling %zu init functions...\n", self->init_count);
+	
+	for (size_t i = 0; i < self->init_count; i++) {
+		void (*func)(void) = ((void(**)(void)) self->init_array)[i];
+		
+		LOG("Func addr: <%p>\n", func);
+		
+		if (func) {
+			func();
 		}
 	}
 }
@@ -714,6 +860,22 @@ LeafSym *LeafSymbolInfo(Leaf *self, const char *symbol_name) {
 	return NULL;
 }
 
+void *LeafBlobPtr(Leaf *self, size_t offset) {
+	/**
+	 * Return a pointer to `offset` in memory relative to the load address
+	 */
+	
+	return self->blob + offset;
+}
+
+size_t LeafBlobLength(Leaf *self) {
+	/**
+	 * Return the total loaded size of the ELF
+	 */
+	
+	return self->blob_length;
+}
+
 void LeafFinish(Leaf *self) {
 	/**
 	 * Use LeafFree() unless you are probably just going to rely on exiting the
@@ -721,13 +883,13 @@ void LeafFinish(Leaf *self) {
 	 * with a global variable.
 	 */
 	
-	printf("Calling %d fini functions...", self->fini_count);
+	LOG("Calling %d fini functions...", self->fini_count);
 	
 	// remember: run them backwards
 	for (size_t i = 1; i <= self->fini_count; i++) {
 		void(*func)(void) = self->fini_array[self->fini_count - i];
 		
-		printf("Func addr: <%p>\n", func);
+		LOG("Func addr: <%p>\n", func);
 		
 		if (func) {
 			func();
