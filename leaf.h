@@ -36,6 +36,7 @@
 #include <elf.h>
 #include <errno.h>
 #include <dlfcn.h>
+#include <unistd.h>
 
 #if defined(__arm__) || defined(__i386__)
 #define LEAF_32BIT
@@ -124,8 +125,6 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length);
 const char *LeafLoadFromFile(Leaf *self, const char *path);
 void *LeafSymbolAddr(Leaf *self, const char *symbol_name);
 LeafSym *LeafSymbolInfo(Leaf *self, const char *symbol_name);
-void *LeafBlobPtr(Leaf *self, size_t offset);
-size_t LeafBlobLength(Leaf *self);
 void LeafFree(Leaf *self);
 
 #ifdef LEAF_IMPLEMENTATION
@@ -241,8 +240,53 @@ Leaf *LeafInit(void) {
 	return self;
 }
 
+#define LEAF_ALIGN_UP(ADDR, ALIGN) (ADDR + (ALIGN - (ADDR % ALIGN)))
+#define LEAF_ALIGN_DOWN(ADDR, ALIGN) (ADDR - (ADDR % ALIGN))
+
 static void *LeafMakeMap(size_t size, size_t alignment) {
-	return mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	/**
+	 * Makes a RWX, ANON memory map starting at an address aligned for the given
+	 * alignment and that is at least size bytes.
+	 * 
+	 * Sadly there is no way (that I know of) to directly request aligned pages,
+	 * so the next best solution is used: allocated more than is needed and trim
+	 * off the unneeded parts using munmap().
+	 */
+	
+	// Size required if we need to always get at least size bytes of aligned
+	// memory.
+	const size_t req_size = size + alignment;
+	
+	// Map memory
+	const void *addr = (size_t) mmap(NULL, req_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	
+	if (addr == MAP_FAILED) {
+		return MAP_FAILED;
+	}
+	
+	const size_t start_addr = (size_t) addr;
+	const size_t end_addr = LEAF_ALIGN_UP(start_addr + req_size, getpagesize());
+	
+	// Find aligned address of memory within the mapping
+	const size_t aligned_addr = LEAF_ALIGN_UP(start_addr, alignment);
+	
+	// Calculate amount to trim from start and end of the mapping
+	// Note that we need to take less from the after portition so we don't
+	// accidentially trim off the last page
+	const size_t trim_before = aligned_addr - start_addr;
+	const size_t trim_after = LEAF_ALIGN_DOWN(alignment - trim_before, getpagesize());
+	
+	// Unmap parts
+	if (trim_before) {
+		munmap(addr, trim_before);
+	}
+	
+	if (trim_after) {
+		munmap((void *) (end_addr - trim_after), trim_after);
+	}
+	
+	// Finally return aligned address
+	return (void *) aligned_addr;
 }
 
 static void *LeafGetRealAddr(Leaf *self, size_t base_addr) {
@@ -333,29 +377,6 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 		self->phdrs[i] = phdr;
 	}
 	
-// 	// Determine how much memory we need to map based on loadable segment sizes
-// 	// since base address == 0 for ET_DYN we can just use the highest VirtAddr
-// 	// + MemSiz value
-// 	size_t highest = 0;
-// 	
-// 	for (size_t i = 0; i < phnum; i++) {
-// 		if (self->phdrs[i]->p_type == PT_LOAD) {
-// 			// don't need to check if its larger, PT_LOAD's should be sorted
-// 			// by p_vaddr from low->high
-// 			highest = self->phdrs[i]->p_vaddr + self->phdrs[i]->p_memsz;
-// 		}
-// 	}
-// 	
-// 	LOG("leaf: highest value = 0x%zx, mapping...\n", highest);
-// 	
-// 	// Map memory for loadable segments, copy their contents
-// 	self->blob = LeafMakeMap(highest);
-// 	self->blob_length = highest;
-// 	
-// 	if (self->blob == MAP_FAILED) {
-// 		return strerror(errno);
-// 	}
-	
 	// Count the number of LOAD headers (actual segments) so we can malloc()
 	// the array of segment info structures.
 	size_t segment_count = 0;
@@ -408,25 +429,6 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 		}
 	}
 	
-	// load code, data, etc and also find location of dynamic symbol table
-// 	LOG("leaf: mapped at <%p>, copying...\n", self->blob);
-// 	
-// 	LeafDyn *dyns = NULL;
-// 	
-// 	for (size_t i = 0; i < phnum; i++) {
-// 		LeafPhdr *phdr = self->phdrs[i];
-// 		
-// 		if (phdr->p_type == PT_LOAD) {
-// 			LeafStreamSetpos(stream, phdr->p_offset);
-// 			LeafStreamReadInto(stream, phdr->p_filesz, self->blob + phdr->p_vaddr);
-// 		}
-// 		else if (phdr->p_type == PT_DYNAMIC) {
-// 			LeafStreamSetpos(stream, phdr->p_offset);
-// 			dyns = LeafStreamGetptr(stream);
-// 		}
-// 		// I think we can ignore the PT_GNU_STACK and PT_GNU_RELRO, but maybe
-// 		// not PT_GNU_EH_FRAME ?
-// 	}
 	
 	if (!dyns) {
 		return "Failed to find dynamic info";
@@ -435,7 +437,6 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	// Get information from dynamic segment
 	// WARNING: Lots of unimplemented stuff here, only implemented what's from
 	// libsmashhit.so
-	// NOTE: try only to use things from the loaded blob now
 	const char *strtab = NULL;
 	size_t strtab_size;
 	
@@ -473,19 +474,20 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				break;
 			}
 			case DT_HASH: {
-				sym_count = ((Elf32_Word *)(self->blob + dyns[i].d_un.d_ptr))[1];
+				Elf32_Word *p = LeafGetRealAddr(self, dyns[i].d_un.d_val);
+				sym_count = p[1];
 				break;
 			}
 			case DT_STRTAB: {
-				strtab = self->blob + dyns[i].d_un.d_ptr;
+				strtab = LeafGetRealAddr(self, dyns[i].d_un.d_val);
 				break;
 			}
 			case DT_SYMTAB: {
-				symtab = self->blob + dyns[i].d_un.d_ptr;
+				symtab = LeafGetRealAddr(self, dyns[i].d_un.d_val);
 				break;
 			}
 			case DT_RELA: {
-				relocs = self->blob + dyns[i].d_un.d_ptr;
+				relocs = LeafGetRealAddr(self, dyns[i].d_un.d_val);
 				break;
 			}
 			case DT_RELASZ: {
@@ -509,7 +511,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				break;
 			}
 			case DT_REL: {
-				relocs = self->blob + dyns[i].d_un.d_ptr;
+				relocs = LeafGetRealAddr(self, dyns[i].d_un.d_val);
 				break;
 			}
 			case DT_RELSZ: {
@@ -529,15 +531,15 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				break;
 			}
 			case DT_JMPREL: {
-				plt_relocs = self->blob + dyns[i].d_un.d_ptr;
+				plt_relocs = LeafGetRealAddr(self, dyns[i].d_un.d_val);
 				break;
 			}
 			case DT_INIT_ARRAY: {
-				init_array = self->blob + dyns[i].d_un.d_ptr;
+				init_array = LeafGetRealAddr(self, dyns[i].d_un.d_val);
 				break;
 			}
 			case DT_FINI_ARRAY: {
-				fini_array = self->blob + dyns[i].d_un.d_ptr;
+				fini_array = LeafGetRealAddr(self, dyns[i].d_un.d_val);
 				break;
 			}
 			case DT_INIT_ARRAYSZ: {
@@ -645,14 +647,15 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				break;
 			}
 			default: {
-				// not a special case, just relocate relative to blob
-				sym->st_value += (size_t) self->blob;
+				// not a special case, just relocate to it's loaded address
+				sym->st_value = LeafGetRealAddr(self, sym->st_value);
 				break;
 			}
 		}
 	}
 	
 	// Replace __cxa_atexit with our own dummy
+	// TODO: Is this realllly needed?
 	LeafSym *p_cxa_atexit_sym = LeafSymbolInfo(self, "__cxa_atexit");
 	LeafSym *p_aeabi_atexit_sym = LeafSymbolInfo(self, "__aeabi_atexit");
 	
@@ -705,14 +708,14 @@ void LeafDoRela(Leaf *self, LeafRela *relocs, size_t reloc_count) {
 	for (size_t i = 0; i < reloc_count; i++) {
 		LeafRela *rela = &relocs[i];
 		
-		void *where = self->blob + rela->r_offset;
+		void *where = LeafGetRealAddr(self, rela->r_offset);
 		
 		switch (LeafRelocType(rela->r_info)) {
 			// TODO other arches
 #ifdef __aarch64__
 			case R_AARCH64_RELATIVE: {
 				// I think this works (?) since all symbols are zero in my case.
-				void *result = self->blob + rela->r_addend;
+				void *result = LeafGetRealAddr(self, rela->r_addend);
 				*((void **)where) = result;
 				break;
 			}
@@ -735,13 +738,13 @@ void LeafDoRel(Leaf *self, LeafRel *relocs, size_t reloc_count) {
 	for (size_t i = 0; i < reloc_count; i++) {
 		LeafRel *rel = &relocs[i];
 		
-		void *where = self->blob + rel->r_offset;
+		void *where = LeafGetRealAddr(self, rel->r_offset);
 		
 		switch (LeafRelocType(rel->r_info)) {
 			// TODO other arches
 #ifdef __arm__
 			case R_ARM_RELATIVE: {
-				void *result = self->blob + *((size_t *) where);
+				void *result = LeafGetRealAddr(self, *((size_t *) where));
 				*((void **)where) = result;
 				break;
 			}
@@ -766,7 +769,7 @@ void LeafDoRel(Leaf *self, LeafRel *relocs, size_t reloc_count) {
 			}
 			case R_386_RELATIVE: {
 				// B + A
-				void *result = self->blob + *((size_t *) where);
+				void *result = LeafGetRealAddr(self, *((size_t *) where));
 				*((void **)where) = result;
 				break;
 			}
@@ -869,22 +872,6 @@ LeafSym *LeafSymbolInfo(Leaf *self, const char *symbol_name) {
 	return NULL;
 }
 
-void *LeafBlobPtr(Leaf *self, size_t offset) {
-	/**
-	 * Return a pointer to `offset` in memory relative to the load address
-	 */
-	
-	return self->blob + offset;
-}
-
-size_t LeafBlobLength(Leaf *self) {
-	/**
-	 * Return the total loaded size of the ELF
-	 */
-	
-	return self->blob_length;
-}
-
 void LeafFinish(Leaf *self) {
 	/**
 	 * Use LeafFree() unless you are probably just going to rely on exiting the
@@ -930,11 +917,16 @@ void LeafFree(Leaf *self) {
 	
 	free(self->phdrs);
 	
+	// Unmap segments and info structures
+	for (size_t i = 0; i < self->segment_count; i++) {
+		LeafLoadedSegment *s = &self->segments[i];
+		munmap(s->addr, s->size);
+	}
+	
+	free(self->segments);
+	
 	// Everything else is just a pointer to something in the loaded program
 	// memory...
-	
-	// Unmap program memory
-	munmap(self->blob, self->blob_length);
 	
 	// Free own memory
 	free(self);
