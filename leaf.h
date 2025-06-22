@@ -381,19 +381,28 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	for (size_t i = 0, j = 0; i < phnum; i++) {
 		if (self->phdrs[i]->p_type == PT_LOAD) {
 			LeafPhdr *phdr = &self->phdrs[i];
+			LeafLoadedSegment *seg = &self->segments[j];
 			
-			// Mind that for Leaf we ignore p_map
-			self->segments[j].addr = LeafMakeMap(phdr->p_memsz, phdr->p_align);
-			self->segments[j].size = phdr->p_memsz;
-			self->segments[j].orig_addr = phdr->p_vaddr;
+			// Mind that for Leaf we ignore the flags (permissions) and always
+			// use RWX. Maybe in the future we could only mark RW for pages
+			// without execute but I don't think that's a problem right now.
+			seg->addr = LeafMakeMap(phdr->p_memsz, phdr->p_align);
+			seg->size = phdr->p_memsz;
+			seg->orig_addr = phdr->p_vaddr;
 			
-			if (!self->segments[j].addr == MAP_FAILED) {
+			if (!seg->addr == MAP_FAILED) {
 				return strerror(errno);
 			}
+			
+			// Load segment contents, or at least the ones we're supposed to
+			LeafStreamSetpos(stream, phdr->p_offset);
+			LeafStreamReadInto(stream, phdr->p_filesz, seg->addr);
 			
 			j++;
 		}
 		else if (phdr->p_type == PT_DYNAMIC) {
+			// TODO: I'd like to actually load the dynamic segment into
+			// permanent memory.
 			LeafStreamSetpos(stream, phdr->p_offset);
 			dyns = LeafStreamGetptr(stream);
 		}
