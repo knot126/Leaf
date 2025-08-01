@@ -70,6 +70,12 @@
 #define LeafSymBind(i) (i >> 4)
 #define LeafSymType(i) (i & 0xf)
 
+struct Leaf;
+
+typedef struct void *(*LeafDlopenFunction)(struct Leaf *self, const char *name);
+typedef struct void *(*LeafDlsymFunction)(struct Leaf *self, void *handle, const char *symbol);
+typedef struct void (*LeafDlcloseFunction)(struct Leaf *self, void *handle);
+
 typedef struct LeafLoadedSegment {
 	void *addr;
 	size_t orig_addr;
@@ -84,9 +90,7 @@ typedef struct Leaf {
 	// Segments of the program
 	// 
 	// Originally to implement loading things aligned I was going to load
-	// segments sparsely, but it seems like that doesn't work with SH. I'm not
-	// sure if that's actually conformant to the ELF spec since both sections
-	// really.
+	// segments sparsely, but it seems like that doesn't work with SH.
 	LeafLoadedSegment *segments;
 	size_t segment_count;
 	
@@ -122,6 +126,11 @@ typedef struct Leaf {
 	// Finialisation function array
 	void **fini_array;
 	size_t fini_count;
+	
+	// Callbacks for external libraries
+	LeafDlopenFunction dl_open;
+	LeafDlsymFunction dl_sym;
+	LeafDlcloseFunction dl_close;
 } Leaf;
 
 typedef struct LeafStream {
@@ -131,6 +140,7 @@ typedef struct LeafStream {
 } LeafStream;
 
 Leaf *LeafInit(void);
+bool LeafSetLoaderCallbacks(Leaf *self, LeafDlopenFunction open, LeafDlsymFunction sym, LeafDlcloseFunction close);
 const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length);
 const char *LeafLoadFromFile(Leaf *self, const char *path);
 void *LeafSymbolAddr(Leaf *self, const char *symbol_name);
@@ -230,6 +240,21 @@ static int Leaf__cxa_atexit(void (*func)(void *), void *arg, void *dso_handle) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// Default dlopen, dlsym and dlclose callbacks
+//////////////////////////////////////////////
+static void *LeafDefaultDlopen(Leaf *self, const char *name) {
+	return dlopen(name, RTLD_NOW | RTLD_GLOBAL);
+}
+
+static void *LeafDefaultDlsym(Leaf *self, void *handle, const char *symbol) {
+	return dlsym(handle, symbol);
+}
+
+static void LeafDefaultDlclose(Leaf *self, void *handle) {
+	dlclose(handle);
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // Leaf itself
 //////////////
 
@@ -246,7 +271,23 @@ Leaf *LeafInit(void) {
 	
 	memset(self, 0, sizeof *self);
 	
+	self->dl_open = LeafDefaultDlopen;
+	self->dl_sym = LeafDefaultDlsym;
+	self->dl_close = LeafDefaultDlclose;
+	
 	return self;
+}
+
+static void *LeafDlopen(Leaf *self, const char *name) {
+	return self->dl_open(self, name);
+}
+
+static void *LeafDlsym(Leaf *self, void *handle, const char *name) {
+	return self->dl_sym(self, handle, name);
+}
+
+static void LeafDlclose(Leaf *self, void *handle) {
+	return self->dl_close(self, handle);
 }
 
 #define LEAF_ALIGN_UP(ADDR, ALIGN) ((ADDR) + ((ALIGN) - ((ADDR) % (ALIGN))))
@@ -360,8 +401,8 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 		return "Too new or invalid ELF version";
 	}
 	
-	if (self->ehdr->e_type != ET_DYN) {
-		return "Only loading shared objects is supported";
+	if (self->ehdr->e_type != ET_EXEC || self->ehdr->e_type != ET_DYN) {
+		return "Only executables and shared objects are supported";
 	}
 	
 	// TODO: e_machine
@@ -660,7 +701,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	for (size_t i = 0; i < self->dl_handle_count; i++) {
 		LOG("Dep lib soname: %s\n", (char *)self->dl_handles[i]);
 		
-		self->dl_handles[i] = dlopen(self->dl_handles[i], RTLD_NOW | RTLD_GLOBAL);
+		self->dl_handles[i] = LeafDlopen(self, self->dl_handles[i]);
 		
 		if (!self->dl_handles[i]) {
 			LOG("Loading lib failed! Continuing anyways...\n");
@@ -694,7 +735,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 				// that works in this case...
 				for (size_t j = 0; j < self->dl_handle_count; j++) {
 					if (self->dl_handles[j] != NULL) {
-						void *symbol_value = dlsym(self->dl_handles[j], symbol_name);
+						void *symbol_value = LeafDlsym(self, self->dl_handles[j], symbol_name);
 						
 						if (symbol_value) {
 							sym->st_value = (LeafAddr) symbol_value;
@@ -908,6 +949,13 @@ const char *LeafLoadFromFile(Leaf *self, const char *path) {
 	return error;
 }
 
+bool LeafSetLoaderCallbacks(Leaf *self, LeafDlopenFunction open, LeafDlsymFunction sym, LeafDlcloseFunction close) {
+	self->dl_open = open || self->dl_open;
+	self->dl_sym = sym || self->dl_sym;
+	self->dl_close = close || self->dl_close;
+	return true;
+}
+
 void *LeafSymbolAddr(Leaf *self, const char *symbol_name) {
 	/**
 	 * Find the address of the given symbol.
@@ -972,7 +1020,7 @@ void LeafFree(Leaf *self) {
 	// Close and free dl_handles
 	for (size_t i = 0; i < self->dl_handle_count; i++) {
 		if (self->dl_handles[i]) {
-			dlclose(self->dl_handles[i]);
+			LeafDlclose(self, self->dl_handles[i]);
 		}
 	}
 	
