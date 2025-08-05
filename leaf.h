@@ -425,7 +425,7 @@ size_t LeafSymbolTableLengthFromGnuHash(LeafGnuHashTable *self_) {
 		chain++;
 	}
 	
-	return max ? max : self->sym_offset;
+	return max ? (max + 1) : self->sym_offset;
 }
 
 #undef CHAIN_PTR
