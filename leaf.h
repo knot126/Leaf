@@ -43,27 +43,31 @@
 #endif
 
 #ifdef LEAF_32BIT
-#define LEAF_CURRENT_CLASS 1
-#define LeafEhdr Elf32_Ehdr
-#define LeafPhdr Elf32_Phdr
-#define LeafDyn  Elf32_Dyn
-#define LeafRel  Elf32_Rel
-#define LeafRela Elf32_Rela
-#define LeafSym  Elf32_Sym
-#define LeafAddr Elf32_Addr
-#define LeafRelocSym(i) (i >> 8)
-#define LeafRelocType(i) (i & 0xff)
+	#define LEAF_CURRENT_CLASS 1
+	#define LeafEhdr Elf32_Ehdr
+	#define LeafPhdr Elf32_Phdr
+	#define LeafDyn  Elf32_Dyn
+	#define LeafRel  Elf32_Rel
+	#define LeafRela Elf32_Rela
+	#define LeafSym  Elf32_Sym
+	#define LeafAddr Elf32_Addr
+	#define LeafRelocSym(i) (i >> 8)
+	#define LeafRelocType(i) (i & 0xff)
 #else
-#define LEAF_CURRENT_CLASS 2
-#define LeafEhdr Elf64_Ehdr
-#define LeafPhdr Elf64_Phdr
-#define LeafDyn  Elf64_Dyn
-#define LeafRel  Elf64_Rel
-#define LeafRela Elf64_Rela
-#define LeafSym  Elf64_Sym
-#define LeafAddr Elf64_Addr
-#define LeafRelocSym(i) (i >> 32)
-#define LeafRelocType(i) (i & 0xffffffff)
+	#define LEAF_CURRENT_CLASS 2
+	#define LeafEhdr Elf64_Ehdr
+	#define LeafPhdr Elf64_Phdr
+	#define LeafDyn  Elf64_Dyn
+	#define LeafRel  Elf64_Rel
+	#define LeafRela Elf64_Rela
+	#define LeafSym  Elf64_Sym
+	#define LeafAddr Elf64_Addr
+	#define LeafRelocSym(i) (i >> 32)
+	#define LeafRelocType(i) (i & 0xffffffff)
+#endif
+
+#ifndef DT_GNU_HASH
+	#define DT_GNU_HASH 0x6ffffef5
 #endif
 
 // Same for 32/64 bit
@@ -363,6 +367,70 @@ void *LeafGetRealAddr(Leaf *self, size_t virt_addr) {
 	return NULL;
 }
 
+typedef struct LeafGnuHashTable {
+	/**
+	 * Structure of a GNU hash table, which has sadly never been formally
+	 * specified. What cocks the GNU Corporation are.
+	 * 
+	 * COMMENT: I personally don't like the design of this hash table. I see
+	 * the bloom filter as largely useless complexity (how many non-existent
+	 * symbol lookups occur in real world apps anyway?) and the lack of an easy
+	 * way to find the symbol count is a large fuck you to anyone who wants to
+	 * do something actually sane without relying on debug symbols existing.
+	 * 
+	 * SEE: https://flapenguin.me/elf-dt-gnu-hash
+	 */
+	
+	uint32_t num_buckets;
+	uint32_t sym_offset;
+	uint32_t bloom_size;
+	uint32_t bloom_shift;
+	uint32_t data[];
+	// The above entry is provided so it's easier to access the symbol index
+	// chain. The actual structure, for anyone curious, is something like:
+	// 
+	// size_t bloom[bloom_size];
+	// uint32_t buckets[num_buckets];
+	// uint32_t chain[];
+} LeafGnuHashTable;
+
+#ifdef LEAF_32BIT
+#define BLOOM_SIZE_WORDS(x) (x->bloom_size)
+#else
+#define BLOOM_SIZE_WORDS(x) (2*(x->bloom_size))
+#endif
+#define CHAIN_PTR(x) (&x->data[BLOOM_SIZE_WORDS(x) + (x->num_buckets)])
+
+size_t LeafSymbolTableLengthFromGnuHash(LeafGnuHashTable *self_) {
+	/**
+	 * Find the length of a symbol table from a proprietary GNU hash table. We
+	 * do this by iterating over the entire hash chain searching for the highest
+	 * index.
+	 */
+	
+	struct LeafGnuHashTable *self = self_;
+	uint32_t *chain = CHAIN_PTR(self);
+	uint32_t max = 0;
+	
+	for (size_t i = 0; i < self->num_buckets;) {
+		if ((chain[0] >> 1) > max) {
+			max = (chain[0] >> 1);
+		}
+		
+		// End of a bucket
+		if (chain[0] & 1) {
+			i++;
+		}
+		
+		chain++;
+	}
+	
+	return max ? max : self->sym_offset;
+}
+
+#undef CHAIN_PTR
+#undef BLOOM_SIZE_WORDS
+
 const uint8_t ELF_SIGNATURE[] = {0x7f, 'E', 'L', 'F'};
 
 void LeafDoRela(Leaf *self, LeafRela *relocs, size_t reloc_count);
@@ -580,6 +648,11 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 			case DT_HASH: {
 				Elf32_Word *p = LeafGetRealAddr(self, dyns[i].d_un.d_val);
 				sym_count = p[1];
+				break;
+			}
+			case DT_GNU_HASH: {
+				LeafGnuHashTable *ght = LeafGetRealAddr(self, dyns[i].d_un.d_val);
+				sym_count = LeafSymbolTableLengthFromGnuHash(ght);
 				break;
 			}
 			case DT_STRTAB: {
