@@ -1,4 +1,4 @@
-<img src="img/Leaf.png" align="center" style="width:80%"/>
+<img src="img/Leaf.png" style="width:100%"/>
 
 # Leaf
 
