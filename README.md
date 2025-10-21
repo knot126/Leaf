@@ -9,5 +9,5 @@ Leaf is a collection of single header libraries meant for working with programs 
 
 ## Future Plans
 
-* Thread safe LeafHook with more hooking/detour methods (instruction copy, software break), , and even mid-function hooking.
+* Thread safe LeafHook with more hooking/detour methods (instruction copy, software break), unhooking support, and even mid-function hooking.
 * LeafDebug for debugging programs without a "real" debugger.
