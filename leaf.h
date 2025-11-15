@@ -5,7 +5,7 @@
  * 
  * ****************************************************************************
  * 
- * Copyright (C) 2024 - 2025 Knot126
+ * This file is part of Leaf. Copyright (C) 2024 - 2025 Knot126.
  * 
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the “Software”), to deal
@@ -25,6 +25,10 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
+
+#if !defined(__arm__) && !defined(__aarch64__) && !defined(__i386__)
+	#error "This platform isn't supported by Leaf yet!"
+#endif
 
 #ifndef LEAF_HEADER
 #define LEAF_HEADER
@@ -76,9 +80,9 @@
 
 struct Leaf;
 
-typedef struct void *(*LeafDlopenFunction)(struct Leaf *self, const char *name);
-typedef struct void *(*LeafDlsymFunction)(struct Leaf *self, void *handle, const char *symbol);
-typedef struct void (*LeafDlcloseFunction)(struct Leaf *self, void *handle);
+typedef void *(*LeafDlopenFunction)(struct Leaf *self, const char *name);
+typedef void *(*LeafDlsymFunction)(struct Leaf *self, void *handle, const char *symbol);
+typedef void (*LeafDlcloseFunction)(struct Leaf *self, void *handle);
 
 typedef struct LeafLoadedSegment {
 	void *addr;
@@ -1023,9 +1027,9 @@ const char *LeafLoadFromFile(Leaf *self, const char *path) {
 }
 
 bool LeafSetLoaderCallbacks(Leaf *self, LeafDlopenFunction open, LeafDlsymFunction sym, LeafDlcloseFunction close) {
-	self->dl_open = open || self->dl_open;
-	self->dl_sym = sym || self->dl_sym;
-	self->dl_close = close || self->dl_close;
+	self->dl_open = open ? open : self->dl_open;
+	self->dl_sym = sym ? sym : self->dl_sym;
+	self->dl_close = close ? close : self->dl_close;
 	return true;
 }
 
