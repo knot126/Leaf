@@ -473,7 +473,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 		return "Too new or invalid ELF version";
 	}
 	
-	if (self->ehdr->e_type != ET_EXEC || self->ehdr->e_type != ET_DYN) {
+	if (self->ehdr->e_type != ET_EXEC && self->ehdr->e_type != ET_DYN) {
 		return "Only executables and shared objects are supported";
 	}
 	
