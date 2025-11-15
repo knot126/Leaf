@@ -389,7 +389,7 @@ typedef struct LeafGnuHashTable {
 	uint32_t sym_offset;
 	uint32_t bloom_size;
 	uint32_t bloom_shift;
-	uint32_t data[];
+	unsigned char data[];
 	// The above entry is provided so it's easier to access the symbol index
 	// chain. The actual structure, for anyone curious, is something like:
 	// 
@@ -398,12 +398,13 @@ typedef struct LeafGnuHashTable {
 	// uint32_t chain[];
 } LeafGnuHashTable;
 
-#ifdef LEAF_32BIT
-#define BLOOM_SIZE_WORDS(x) (x->bloom_size)
-#else
-#define BLOOM_SIZE_WORDS(x) (2*(x->bloom_size))
-#endif
-#define CHAIN_PTR(x) (&x->data[BLOOM_SIZE_WORDS(x) + (x->num_buckets)])
+// #ifdef LEAF_32BIT
+// #define BLOOM_SIZE_WORDS(x) (x->bloom_size)
+// #else
+// #define BLOOM_SIZE_WORDS(x) (2*(x->bloom_size))
+// #endif
+#define BUCKET_PTR(x) ((void *) &x->data[(sizeof(size_t) * x->bloom_size)])
+#define CHAIN_PTR(x) ((void *) &x->data[(sizeof(size_t) * x->bloom_size) + (sizeof(uint32_t) * x->num_buckets)])
 
 size_t LeafSymbolTableLengthFromGnuHash(LeafGnuHashTable *self_) {
 	/**
@@ -412,24 +413,36 @@ size_t LeafSymbolTableLengthFromGnuHash(LeafGnuHashTable *self_) {
 	 * index.
 	 */
 	
+	// !! FIXME -- THIS DOESNT WORK !! GNU CAN GO FUCK THEMSELVES //
+	
 	struct LeafGnuHashTable *self = self_;
-	uint32_t *chain = CHAIN_PTR(self);
+	uint32_t *buckets = BUCKET_PTR(self);
+	uint32_t *chains = CHAIN_PTR(self);
 	uint32_t max = 0;
 	
-	for (size_t i = 0; i < self->num_buckets;) {
-		if ((chain[0] >> 1) > max) {
-			max = (chain[0] >> 1);
-		}
+	LOG("num_buckets=%d\nsym_offset=%d\nbloom_size=%d\nbloom_shift=%d\n", self->num_buckets, self->sym_offset, self->bloom_size, self->bloom_shift);
+	
+	for (size_t i = 0; i < self->num_buckets; i++) {
+		uint32_t *chain = &chains[buckets[i]];
 		
-		// End of a bucket
-		if (chain[0] & 1) {
-			i++;
+		while (true) {
+			const uint32_t index = chain[0] >> 1;
+			
+			if (index > max) {
+				max = index;
+			}
+			
+			if (chain[0] & 1) {
+				break;
+			}
+			
+			chain++;
 		}
-		
-		chain++;
 	}
 	
-	return max ? (max + 1) : self->sym_offset;
+	LOG("max index: %d\n", max);
+	
+	return max + 1;
 }
 
 #undef CHAIN_PTR
