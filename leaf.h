@@ -5,7 +5,7 @@
  * 
  * ****************************************************************************
  * 
- * This file is part of Leaf. Copyright (C) 2024 - 2025 Knot126.
+ * This file is part of Leaf. Copyright (C) 2024 - 2026 Knot126.
  * 
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the “Software”), to deal
@@ -399,20 +399,19 @@ typedef struct LeafGnuHashTable {
 	// The above entry is provided so it's easier to access the symbol index
 	// chain. The actual structure, for anyone curious, is something like:
 	// 
-	// size_t bloom[bloom_size];        - This stores the bloom table bitfield,
-	//                                    this is actually pretty sane.
-	// uint32_t buckets[num_buckets];   - Stores the starting indexes of the
-	//                                    buckets. Really should be named
-	//                                    "bucket_indexes".
-	// uint32_t chain[num_symbols];     - Really should be named "buckets".
-	//                                    Each entry at some index I corresponds
-	//                                    to a symbol table entry at that same
-	//                                    index.* An entry cotains the upper 31
-	//                                    bits of the hash of the symbol name in
-	//                                    its upper 31 bits to speed up name
-	//                                    checking, and the lowest bit is set to
-	//                                    1 if the chain ends with this symbol
-	//                                    or 0 if the chain continues.
+	// size_t bloom[bloom_size];
+	//     This stores the bloom table bitfield, this is actually pretty sane.
+	// 
+	// uint32_t buckets[num_buckets];
+	//     Stores the starting indexes of the buckets. Really should be named
+	//     "bucket_indexes".
+	// 
+	// uint32_t chain[num_symbols - sym_offset];
+	//     Really should be named "buckets". Each entry at some index I
+	//     corresponds to a symbol table entry at that same index.* An entry
+	//     contains the upper 31 bits of the hash of the symbol name in its
+	//     upper 31 bits to speed up name checking, and the lowest bit is set to
+	//     1 if the chain ends with this symbol or 0 if the chain continues.
 	// 
 	// The names of the "chains" and "buckets" are very misleading or at least
 	// very ambigous for anyone not fimilar with symbol hashing in ELF. Only
@@ -455,7 +454,7 @@ size_t LeafSymbolTableLengthFromGnuHash(LeafGnuHashTable *self_) {
 	
 	// IIRC this means none of the buckets had anything
 	if (index == 0) {
-		return index;
+		return self->sym_offset;
 	}
 	
 	// Find index of last symbol in that chain to get last symbol in table
@@ -935,7 +934,6 @@ void LeafDoRela(Leaf *self, LeafRela *relocs, size_t reloc_count) {
 			// TODO other arches
 #ifdef __aarch64__
 			case R_AARCH64_RELATIVE: {
-				// LOG("R_AARCH64_RELATIVE 0x%zx 0x%zx\n", (size_t)rela->r_offset, (size_t)rela->r_addend);
 				// I think this works (?) since all symbols are zero in my case.
 				void *result = LeafGetRealAddr(self, rela->r_addend);
 				*((void **)where) = result;
@@ -943,14 +941,26 @@ void LeafDoRela(Leaf *self, LeafRela *relocs, size_t reloc_count) {
 			}
 			case R_AARCH64_GLOB_DAT:
 			case R_AARCH64_JUMP_SLOT: {
-				// LOG("R_AARCH64_GLOB_DAT/R_AARCH64_JUMP_SLOT 0x%zx 0x%zx\n", (size_t)rela->r_offset, (size_t)rela->r_addend);
+				LeafSym *sym = &self->symtab[LeafRelocSym(rela->r_info)];
+				*((size_t *)where) = sym->st_value + rela->r_addend;
+				break;
+			}
+#endif
+#ifdef __x86_64__
+			case R_X86_64_RELATIVE: {
+				void *result = LeafGetRealAddr(self, rela->r_addend);
+				*((void **)where) = result;
+				break;
+			}
+			case R_X86_64_GLOB_DAT:
+			case R_x86_64_JUMP_SLOT: {
 				LeafSym *sym = &self->symtab[LeafRelocSym(rela->r_info)];
 				*((size_t *)where) = sym->st_value + rela->r_addend;
 				break;
 			}
 #endif
 			default: {
-				LOG("Unknown reloc type: offset=0x%zx sym=0x%zx type=0x%zx addend=0x%zx\n", (size_t)rela->r_offset, (size_t)LeafRelocSym(rela->r_info), (size_t)LeafRelocType(rela->r_info), (size_t)rela->r_addend);
+				LOG("Unknown reloc: offset=0x%zx sym=0x%zx type=0x%zx addend=0x%zx\n", (size_t)rela->r_offset, (size_t)LeafRelocSym(rela->r_info), (size_t)LeafRelocType(rela->r_info), (size_t)rela->r_addend);
 				break;
 			}
 		}
@@ -1010,7 +1020,7 @@ void LeafDoRel(Leaf *self, LeafRel *relocs, size_t reloc_count) {
 			}
 #endif
 			default: {
-				LOG("Unknown reloc type: offset=0x%zx sym=0x%zx type=0x%zx\n", (size_t)rel->r_offset, (size_t)LeafRelocSym(rel->r_info), (size_t)LeafRelocType(rel->r_info));
+				LOG("Unknown reloc: offset=0x%zx sym=0x%zx type=0x%zx\n", (size_t)rel->r_offset, (size_t)LeafRelocSym(rel->r_info), (size_t)LeafRelocType(rel->r_info));
 				break;
 			}
 		}
@@ -1109,7 +1119,7 @@ void LeafFinish(Leaf *self) {
 	 * with a global variable.
 	 */
 	
-	LOG("Calling %zu fini functions...", self->fini_count);
+	LOG("Calling %zu fini functions...\n", self->fini_count);
 	
 	// remember: run them backwards
 	for (size_t i = 1; i <= self->fini_count; i++) {

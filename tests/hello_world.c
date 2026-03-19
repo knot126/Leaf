@@ -1,3 +1,5 @@
+// clang -o hello32.bin -rdynamic -m32 ./hello_world.c
+
 #include <stdio.h>
 
 int main(int argc, const char *argv[]) {
