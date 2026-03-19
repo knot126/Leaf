@@ -376,6 +376,10 @@ typedef struct LeafGnuHashTable {
 	 * Structure of a GNU hash table, which has sadly never been formally
 	 * specified. What cocks the GNU Corporation are.
 	 * 
+	 * Keep in mind this uses chains to resolve collisions, so if you are only
+	 * fimilar with open addressing based collision resolution you may want to
+	 * freshen up on this before hacking on this code.
+	 * 
 	 * COMMENT: I personally don't like the design of this hash table. I see
 	 * the bloom filter as largely useless complexity (how many non-existent
 	 * symbol lookups occur in real world apps anyway?) and the lack of an easy
@@ -383,6 +387,7 @@ typedef struct LeafGnuHashTable {
 	 * do something actually sane without relying on debug symbols existing.
 	 * 
 	 * SEE: https://flapenguin.me/elf-dt-gnu-hash
+	 * SEE: https://maskray.me/blog/2022-08-21-glibc-and-dt-gnu-hash
 	 */
 	
 	uint32_t num_buckets;
@@ -390,19 +395,35 @@ typedef struct LeafGnuHashTable {
 	uint32_t bloom_size;
 	uint32_t bloom_shift;
 	unsigned char data[];
+	
 	// The above entry is provided so it's easier to access the symbol index
 	// chain. The actual structure, for anyone curious, is something like:
 	// 
-	// size_t bloom[bloom_size];
-	// uint32_t buckets[num_buckets];
-	// uint32_t chain[];
+	// size_t bloom[bloom_size];        - This stores the bloom table bitfield,
+	//                                    this is actually pretty sane.
+	// uint32_t buckets[num_buckets];   - Stores the starting indexes of the
+	//                                    buckets. Really should be named
+	//                                    "bucket_indexes".
+	// uint32_t chain[num_symbols];     - Really should be named "buckets".
+	//                                    Each entry at some index I corresponds
+	//                                    to a symbol table entry at that same
+	//                                    index.* An entry cotains the upper 31
+	//                                    bits of the hash of the symbol name in
+	//                                    its upper 31 bits to speed up name
+	//                                    checking, and the lowest bit is set to
+	//                                    1 if the chain ends with this symbol
+	//                                    or 0 if the chain continues.
+	// 
+	// The names of the "chains" and "buckets" are very misleading or at least
+	// very ambigous for anyone not fimilar with symbol hashing in ELF. Only
+	// buckets are part of the actual hash table. The "chains" just contain the
+	// stored hashes of the symbol names, and are used to speed up hashing and
+	// determine the end (size) of a bucket.
+	// 
+	// * Not taking the sym_offset into account. Stated more correctly the chain
+	// index for a symbol table index I is I - sym_offset.
 } LeafGnuHashTable;
 
-// #ifdef LEAF_32BIT
-// #define BLOOM_SIZE_WORDS(x) (x->bloom_size)
-// #else
-// #define BLOOM_SIZE_WORDS(x) (2*(x->bloom_size))
-// #endif
 #define BUCKET_PTR(x) ((void *) &x->data[(sizeof(size_t) * x->bloom_size)])
 #define CHAIN_PTR(x) ((void *) &x->data[(sizeof(size_t) * x->bloom_size) + (sizeof(uint32_t) * x->num_buckets)])
 
@@ -411,42 +432,45 @@ size_t LeafSymbolTableLengthFromGnuHash(LeafGnuHashTable *self_) {
 	 * Find the length of a symbol table from a proprietary GNU hash table. We
 	 * do this by iterating over the entire hash chain searching for the highest
 	 * index.
+	 * 
+	 * I hope to god it works this time.
 	 */
-	
-	// !! FIXME -- THIS DOESNT WORK !! GNU CAN GO FUCK THEMSELVES //
 	
 	struct LeafGnuHashTable *self = self_;
 	uint32_t *buckets = BUCKET_PTR(self);
 	uint32_t *chains = CHAIN_PTR(self);
-	uint32_t max = 0;
 	
-	LOG("num_buckets=%d\nsym_offset=%d\nbloom_size=%d\nbloom_shift=%d\n", self->num_buckets, self->sym_offset, self->bloom_size, self->bloom_shift);
+	// The highest valid index, as far as we're currently aware
+	uint32_t index = 0;
 	
-	for (size_t i = 0; i < self->num_buckets; i++) {
-		uint32_t *chain = &chains[buckets[i]];
-		
-		while (true) {
-			const uint32_t index = chain[0] >> 1;
-			
-			if (index > max) {
-				max = index;
-			}
-			
-			if (chain[0] & 1) {
-				break;
-			}
-			
-			chain++;
+	// Find highest bucket starting index
+	// TODO: Are these always in order? If so we can search from the back for
+	// something much faster, but I don't think they are guaranteed to be
+	// that way.
+	for (uint32_t i = 0; i < self->num_buckets; i++) {
+		if (self->buckets[i] > index) {
+			index = self->buckets[i];
 		}
 	}
 	
-	LOG("max index: %d\n", max);
+	// IIRC this means none of the buckets had anything
+	if (index == 0) {
+		return index;
+	}
 	
-	return max + 1;
+	// Find index of last symbol in that chain to get last symbol in table
+	for (uint32_t l = 0;; l++) {
+		if (chains[(index - self->sym_offset) + l] & 1) {
+			index += l + 1;
+			break;
+		}
+	}
+	
+	return index;
 }
 
+#undef BUCKET_PTR
 #undef CHAIN_PTR
-#undef BLOOM_SIZE_WORDS
 
 const uint8_t ELF_SIGNATURE[] = {0x7f, 'E', 'L', 'F'};
 
