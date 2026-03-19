@@ -165,7 +165,7 @@ void LeafFree(Leaf *self);
 		#define LOG(...) __android_log_print(ANDROID_LOG_INFO, "Leaf", __VA_ARGS__)
 	#else
 		#include <stdio.h>
-		#define LOG(...) fprintf(stderr, __VA_ARGS__);
+		#define LOG(...) fprintf(stderr, "[LEAF]" __VA_ARGS__);
 	#endif
 #else
 	#define LOG(...)
@@ -448,8 +448,8 @@ size_t LeafSymbolTableLengthFromGnuHash(LeafGnuHashTable *self_) {
 	// something much faster, but I don't think they are guaranteed to be
 	// that way.
 	for (uint32_t i = 0; i < self->num_buckets; i++) {
-		if (self->buckets[i] > index) {
-			index = self->buckets[i];
+		if (buckets[i] > index) {
+			index = buckets[i];
 		}
 	}
 	
