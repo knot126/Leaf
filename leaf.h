@@ -26,7 +26,7 @@
  * SOFTWARE.
  */
 
-#if !defined(__arm__) && !defined(__aarch64__) && !defined(__i386__)
+#if !defined(__arm__) && !defined(__aarch64__) && !defined(__i386__) && !defined(__x86_64__)
 	#error "This platform isn't supported by Leaf yet!"
 #endif
 
@@ -953,7 +953,7 @@ void LeafDoRela(Leaf *self, LeafRela *relocs, size_t reloc_count) {
 				break;
 			}
 			case R_X86_64_GLOB_DAT:
-			case R_x86_64_JUMP_SLOT: {
+			case R_X86_64_JUMP_SLOT: {
 				LeafSym *sym = &self->symtab[LeafRelocSym(rela->r_info)];
 				*((size_t *)where) = sym->st_value + rela->r_addend;
 				break;
