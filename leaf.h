@@ -91,6 +91,11 @@ typedef struct LeafLoadedSegment {
 } LeafLoadedSegment;
 
 typedef struct Leaf {
+	// User data - this can be used to provide a user-defined context for
+	// callback functions like the custom dlopen, dlsym, and dlclose
+	// implementations.
+	void *user_data;
+	
 	// Headers
 	LeafEhdr *ehdr;
 	LeafPhdr **phdrs;
@@ -208,6 +213,10 @@ static size_t LeafStreamReadInto(LeafStream *self, size_t count, void *buffer) {
 }
 
 static void *LeafStreamRead(LeafStream *self, size_t count) {
+	/**
+	 * Read `count` bytes from the stream into a dynamically allocated buffer.
+	 */
+	
 	if (self->pos + count > self->size) {
 		return NULL;
 	}
