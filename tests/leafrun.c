@@ -1,7 +1,9 @@
 /**
  * A really simple app for testing Leaf.
  * 
- * Build: cc -g -o leafrun32.bin -m32 leafrun.c
+ * Build:
+ *     clang -g -o leafrun32.bin -m32 leafrun.c
+ *     clang -g -o leafrun64.bin leafrun.c
  * 
  * ****************************************************************************
  * 
@@ -61,8 +63,15 @@ int main(int argc, const char *argv[]) {
 	Main m = LeafSymbolAddr(leaf, argv[1]);
 	
 	if (!m) {
-		fprintf(stderr, "Symbol not found: %s\n", argv[1]);
-		return 3;
+		m = LeafGetEntryPoint(leaf);
+		
+		if (!m) {
+			fprintf(stderr, "Symbol not found: %s\n", argv[1]);
+			return 3;
+		}
+		else {
+			fprintf(stderr, "Symbol %s not found, use entry point instead\n", argv[1]);
+		}
 	}
 	
 	int ret = m(argc - 2, argv + 2);
