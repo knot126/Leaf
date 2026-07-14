@@ -41,6 +41,7 @@
 #include <errno.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include <stdint.h>
 
 #if defined(__arm__) || defined(__i386__)
 #define LEAF_32BIT
@@ -90,6 +91,20 @@ typedef struct LeafLoadedSegment {
 	size_t size;
 	size_t orig_flags;
 } LeafLoadedSegment;
+
+typedef struct LeafParams {
+	// Request a fixed load address for ELFs which can be loaded at any address.
+	// Set to 0/NULL to disable this feature.
+	size_t load_address;
+	
+	// Leaf can optionally allocate an extra segment before and/or after the
+	// main binary, so that hooking libraries can hook small functions by first
+	// jumping into a trampoline located in these segments, which then does
+	// the actual jump, or so that users can add their own code and patch the
+	// binary to jump to it.
+	size_t pre_extra_size;
+	size_t post_extra_size;
+} LeafParams;
 
 typedef struct Leaf {
 	// User data - this can be used to provide a user-defined context for
@@ -143,6 +158,8 @@ typedef struct Leaf {
 	LeafDlopenFunction dl_open;
 	LeafDlsymFunction dl_sym;
 	LeafDlcloseFunction dl_close;
+	
+	LeafParams params;
 } Leaf;
 
 typedef struct LeafStream {
@@ -151,7 +168,10 @@ typedef struct LeafStream {
 	size_t pos;
 } LeafStream;
 
-Leaf *LeafInit(void);
+#define LEAF_EXTRA_PRE (-1)
+#define LEAF_EXTRA_POST (-2)
+
+Leaf *LeafInit(const LeafParams *params);
 bool LeafSetLoaderCallbacks(Leaf *self, LeafDlopenFunction open, LeafDlsymFunction sym, LeafDlcloseFunction close);
 const char *LeafLoad(Leaf *self, LeafStream *stream);
 const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length);
@@ -160,6 +180,7 @@ void *LeafGetEntryPoint(Leaf *self);
 void *LeafSymbolAddr(Leaf *self, const char *symbol_name);
 LeafSym *LeafSymbolInfo(Leaf *self, const char *symbol_name);
 void *LeafGetRealAddr(Leaf *self, size_t virt_addr);
+void *LeafGetSegment(Leaf *self, int64_t index, size_t *segment_size);
 void LeafFree(Leaf *self);
 
 #ifdef LEAF_IMPLEMENTATION
@@ -294,7 +315,7 @@ static void LeafDefaultDlclose(Leaf *self, void *handle) {
 // Leaf itself
 //////////////
 
-Leaf *LeafInit(void) {
+Leaf *LeafInit(const LeafParams *params) {
 	/**
 	 * Initialise a new instance of Leaf with the given parameters.
 	 */
@@ -306,6 +327,10 @@ Leaf *LeafInit(void) {
 	}
 	
 	memset(self, 0, sizeof *self);
+	
+	if (params) {
+		self->params = *params;
+	}
 	
 	self->dl_open = LeafDefaultDlopen;
 	self->dl_sym = LeafDefaultDlsym;
@@ -630,22 +655,40 @@ const char *LeafLoad(Leaf *self, LeafStream *stream) {
 	
 	LOG("This ELF is a %s\n", (self->ehdr->e_type == ET_DYN) ? "Dynamic Shared Object" : ((pie) ? "Position-Independent Executable" : "Absolute-Address Executable"));
 	
+	// Make pre-ELF extra size aligned so we don't fuck alignment up :)
+	if (self->params.pre_extra_size % max_align) {
+		self->params.pre_extra_size += max_align - (self->params.pre_extra_size % max_align);
+	}
+	
+	LOG("Pre-ELF extra size adjusted to 0x%zx\n", self->params.pre_extra_size);
+	
 	if (self->fixed) {
-		LOG("Solid LeafMakeFixedMap(addr=0x%zx, size=0x%zx)\n", min_vaddr, max_vaddr - min_vaddr);
+		// LOG("Solid LeafMakeFixedMap(addr=0x%zx, size=0x%zx)\n", min_vaddr, max_vaddr - min_vaddr);
 		
 		self->block_size = max_vaddr - min_vaddr;
-		self->block = LeafMakeFixedMap(min_vaddr, self->block_size);
+		const size_t map_size = self->block_size + self->params.pre_extra_size + self->params.post_extra_size;
+		self->block = LeafMakeFixedMap(min_vaddr - self->params.pre_extra_size, map_size);
 	}
 	else {
-		LOG("Solid LeafMakeMap(size=0x%zx, align=0x%zx)\n", max_vaddr, max_align);
+		// LOG("Solid LeafMakeMap(size=0x%zx, align=0x%zx)\n", max_vaddr, max_align);
 		
 		self->block_size = max_vaddr;
-		self->block = LeafMakeMap(max_vaddr, max_align);
+		const size_t map_size = self->block_size + self->params.pre_extra_size + self->params.post_extra_size;
+		
+		if (self->params.load_address) {
+			self->block = LeafMakeFixedMap(self->params.load_address - self->params.pre_extra_size, map_size);
+		}
+		else {
+			self->block = LeafMakeMap(map_size, max_align);
+		}
 	}
 	
 	if (self->block == MAP_FAILED) {
 		return "Anonymous memory map failed";
 	}
+	
+	// Make block point past pre-ELF extra part
+	self->block += self->params.pre_extra_size;
 	
 	// *sigh* I don't really want to loop over everything a third goddamn time,
 	// but I've been forced here. I was originally going to implement "spare"
@@ -1200,6 +1243,42 @@ LeafSym *LeafSymbolInfo(Leaf *self, const char *symbol_name) {
 	return NULL;
 }
 
+void *LeafGetSegment(Leaf *self, int64_t index, size_t *segment_size) {
+	/**
+	 * Get information about segments in the ELF. The index can be either an
+	 * index from 0 (the first segment) to one less than the number of segments
+	 * (for the last segment) for regular segments, or the special values
+	 * LEAF_EXTRA_PRE and LEAF_EXTRA_POST for user pre- and post-ELF extra
+	 * data areas respectively.
+	 * 
+	 * If the segment size is not needed, it can be set to NULL.
+	 * 
+	 * If the index is invalid, this returns NULL and sets segment_size to 0.
+	 */
+	
+	void *ptr = NULL;
+	size_t size = 0;
+	
+	if (index >= 0 && index < self->segment_count) {
+		ptr = self->segments[index].addr;
+		size = self->segments[index].size;
+	}
+	else if (index == LEAF_EXTRA_PRE) {
+		ptr = self->block - self->params.pre_extra_size;
+		size = self->params.pre_extra_size;
+	}
+	else if (index == LEAF_EXTRA_POST) {
+		ptr = self->block + self->block_size;
+		size = self->params.post_extra_size;
+	}
+	
+	if (segment_size) {
+		*segment_size = size;
+	}
+	
+	return ptr;
+}
+
 void LeafFinish(Leaf *self) {
 	/**
 	 * Use LeafFree() unless you are probably just going to rely on exiting the
@@ -1246,14 +1325,7 @@ void LeafFree(Leaf *self) {
 	free(self->phdrs);
 	
 	// Unmap segments and info structures
-#ifdef LEAF_LOAD_SPARSE
-	for (size_t i = 0; i < self->segment_count; i++) {
-		LeafLoadedSegment *s = &self->segments[i];
-		munmap(s->addr, s->size);
-	}
-#else
-	munmap(self->block, self->block_size);
-#endif
+	munmap(self->block - self->params.pre_extra_size, self->block_size + self->params.pre_extra_size + self->params.post_extra_size);
 	
 	free(self->segments);
 	

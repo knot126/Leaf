@@ -46,7 +46,11 @@ int main(int argc, const char *argv[]) {
 		print_usage(argv[0]);
 	}
 	
-	Leaf *leaf = LeafInit();
+	LeafParams params = {
+		.pre_extra_size = 0x147,
+	};
+	
+	Leaf *leaf = LeafInit(&params);
 	
 	if (!leaf) {
 		fprintf(stderr, "Leaf init has failed\n");
