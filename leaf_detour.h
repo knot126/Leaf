@@ -38,11 +38,11 @@
 
 #ifdef __arm__
 #define LEAF_DETOUR_MAX_SIZE 0x8
-#elifdef __aarch64__
+#elif defined(__aarch64__)
 #define LEAF_DETOUR_MAX_SIZE 0x10
-#elifdef __i386__
+#elif defined(__i386__)
 #define LEAF_DETOUR_MAX_SIZE 0x6
-#elifdef __x86_64__
+#elif defined(__x86_64__)
 #define LEAF_DETOUR_MAX_SIZE 0xC // TODO: What is it?
 #else
 #error "Platform unsupported"
@@ -50,7 +50,7 @@
 
 // Optional callback to get a small block of memory within near-jump distance
 // of the .text segment.
-typedef void *(LeafDetourNearBlockFunction)(void *context, void *block, size_t size);
+typedef void *(*LeafDetourNearBlockFunction)(void *context, void *block, size_t size);
 
 typedef struct LeafDetourAlloc {
 	void *context;
@@ -111,7 +111,7 @@ static inline void LeafDetour_ShortJump(unsigned char *buffer, void *from, void 
 	const size_t pcoffset = (((size_t)to - (size_t)from) - 8) >> 2;
 	buf[0] = 0xea000000 | (pcoffset & 0xffffff); // b <imm24>
 }
-#elifdef __aarch64__
+#elif defined(__aarch64__)
 #define SMALL_JUMP_IN_RANGE(FROM, TO) IN_RANGE(-134217728, ((size_t)(TO) - (size_t)(FROM)), 134217724)
 
 #define LONG_JUMP_SIZE 16
@@ -129,7 +129,7 @@ static inline void LeafDetour_ShortJump(unsigned char *buffer, void *from, void 
 	const size_t pcoffset = ((size_t)to - (size_t)from) >> 2;
 	buf[0] = 0x14000000 | (pcoffset & 0x3ffffff); // b <imm26>
 }
-#elifdef __i386__
+#elif defined(__i386__)
 #define LONG_JUMP_SIZE 5
 static inline void LeafDetour_LongJump(unsigned char *buffer, void *from, void *to) {
 	// EIP is the instruction following jump
@@ -137,7 +137,7 @@ static inline void LeafDetour_LongJump(unsigned char *buffer, void *from, void *
 	buffer[0] = 0xE9; // jmp #<offset>
 	*(uint32_t *)(buffer + 1) = pcoffset;
 }
-#elifdef __x86_64__
+#elif defined(__x86_64__)
 #define LONG_JUMP_SIZE 12
 static inline void LeafDetour_LongJump(unsigned char *buffer, void *from, void *to) {
 	// RAX seems(?) safe to modify between function calls, like the arm IP
@@ -186,7 +186,7 @@ int LeafDetourPrepareEx(LeafDetour *self, void *function, size_t function_size, 
 #ifdef SMALL_JUMP_IN_RANGE
 	// Not long enough for a long jump, but still enough for a short jump to a
 	// trampoline in a special area, if that's available. 
-	else if (function_size >= SMALL_JUMP_SIZE) {
+	else if (near && function_size >= SMALL_JUMP_SIZE) {
 		void *trampoline = (near->func)(near->context, NULL, LONG_JUMP_SIZE);
 		
 		if (!trampoline) {
@@ -213,9 +213,9 @@ int LeafDetourPrepareEx(LeafDetour *self, void *function, size_t function_size, 
 void LeafDetourSwap(LeafDetour *self) {
 	unsigned char tempbuf[LEAF_DETOUR_MAX_SIZE];
 	
-	memcpy(tempbuf, function, self->buffer_size);
-	memcpy(function, self->buffer, self->buffer_size);
-	memcpy(self->buffer, tempbuf, self->buffer_size);
+	memcpy(tempbuf, self->function, self->buffer_size);
+	memcpy(self->function, &self->buffer, self->buffer_size);
+	memcpy(&self->buffer, tempbuf, self->buffer_size);
 }
 
 void LeafDetourDestroyEx(LeafDetour *self, LeafDetourAlloc *near) {
