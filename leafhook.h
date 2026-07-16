@@ -1,7 +1,9 @@
 /**
- * LeafHook - single header hooking library usable with Leaf
+ * LeafHook - single header detouring and hooking library usable with Leaf
  * 
  * *****************************************************************************
+ * 
+ * NOTE: Please consider using Leaf Detours if your use case is simple enough.
  * 
  * Usage:
  * 
@@ -19,6 +21,10 @@
 #include <unistd.h>
 #include <inttypes.h>
 #include <stdlib.h>
+
+typedef struct LHDetour {
+	void *function_address;
+} LHDetour;
 
 typedef struct LHHooker {
 	void *rwx_block;
@@ -44,38 +50,55 @@ bool LHHookerHookFunction(LHHooker *self, void *function, void *hook, void **ori
 #define LH_SEXT64(input, nbits) (LH_SEXT_ISNEG(input, nbits) ? (LH_SEXT64_NB(nbits) | input) : input)
 
 // Automatically generated macros for working with ARM instructions
+
 #define MAKE_AARCH64_ADR(imm, Rd) ((((Rd) & 0x1f) << 0) | (((imm >> 2) & 0x7ffff) << 5) | (0b10000 << 24) | (((imm) & 0x3) << 29) | (0b0 << 31))
 #define AARCH64_ADR_DECODE_IMM(input) ((((input >> 29) & 0x3) << 0) | (((input >> 5) & 0x7ffff) << 2))
 #define AARCH64_ADR_DECODE_RD(input) ((((input >> 0) & 0x1f) << 0))
 #define IS_AARCH64_ADR(input) ((input & 0x9f000000) == 0x10000000)
+
 #define MAKE_AARCH64_ADRP(imm, Rd) ((((Rd) & 0x1f) << 0) | (((imm >> 2) & 0x7ffff) << 5) | (0b10000 << 24) | (((imm) & 0x3) << 29) | (0b1 << 31))
 #define AARCH64_ADRP_DECODE_IMM(input) ((((input >> 29) & 0x3) << 0) | (((input >> 5) & 0x7ffff) << 2))
 #define AARCH64_ADRP_DECODE_RD(input) ((((input >> 0) & 0x1f) << 0))
 #define IS_AARCH64_ADRP(input) ((input & 0x9f000000) == 0x90000000)
+
 #define MAKE_AARCH64_LDR_LITERAL(x, imm, Rt) ((((Rt) & 0x1f) << 0) | (((imm) & 0x7ffff) << 5) | (0b011000 << 24) | (((x) & 0x1) << 30) | (0b0 << 31))
 #define AARCH64_LDR_LITERAL_DECODE_X(input) ((((input >> 30) & 0x1) << 0))
 #define AARCH64_LDR_LITERAL_DECODE_IMM(input) ((((input >> 5) & 0x7ffff) << 0))
 #define AARCH64_LDR_LITERAL_DECODE_RT(input) ((((input >> 0) & 0x1f) << 0))
 #define IS_AARCH64_LDR_LITERAL(input) ((input & 0xbf000000) == 0x18000000)
+
 #define MAKE_AARCH64_BR(Rn) ((0b00000 << 0) | (((Rn) & 0x1f) << 5) | (0b1101011000011111000000 << 10))
 #define AARCH64_BR_DECODE_RN(input) ((((input >> 5) & 0x1f) << 0))
 #define IS_AARCH64_BR(input) ((input & 0xfffffc1f) == 0xd61f0000)
+
+#define MAKE_AARCH64_B(imm) ((((imm) & 0x3ffffff) << 0) | (0b000101 << 26))
+#define AARCH64_B_DECODE_IMM(input) ((((input >> 0) & 0x3ffffff) << 0))
+#define IS_AARCH64_B(input) ((input & 0xfc000000) == 0x14000000)
+
 #define MAKE_AARCH32_ADR(Rd, imm) ((((imm) & 0xfff) << 0) | (((Rd) & 0xf) << 12) | (0b1110001010001111 << 16))
 #define AARCH32_ADR_DECODE_RD(input) ((((input >> 12) & 0xf) << 0))
 #define AARCH32_ADR_DECODE_IMM(input) ((((input >> 0) & 0xfff) << 0))
 #define IS_AARCH32_ADR(input) ((input & 0xffff0000) == 0xe28f0000)
+
 #define MAKE_AARCH32_ADR_SUB(Rd, imm) ((((imm) & 0xfff) << 0) | (((Rd) & 0xf) << 12) | (0b1110001010001111 << 16))
 #define AARCH32_ADR_SUB_DECODE_RD(input) ((((input >> 12) & 0xf) << 0))
 #define AARCH32_ADR_SUB_DECODE_IMM(input) ((((input >> 0) & 0xfff) << 0))
 #define IS_AARCH32_ADR_SUB(input) ((input & 0xffff0000) == 0xe28f0000)
+
 #define MAKE_AARCH32_LDR_LITERAL(U, Rt, imm) ((((imm) & 0xfff) << 0) | (((Rt) & 0xf) << 12) | (0b0011111 << 16) | (((U) & 0x1) << 23) | (0b11100101 << 24))
 #define AARCH32_LDR_LITERAL_DECODE_U(input) ((((input >> 23) & 0x1) << 0))
 #define AARCH32_LDR_LITERAL_DECODE_RT(input) ((((input >> 12) & 0xf) << 0))
 #define AARCH32_LDR_LITERAL_DECODE_IMM(input) ((((input >> 0) & 0xfff) << 0))
 #define IS_AARCH32_LDR_LITERAL(input) ((input & 0xff7f0000) == 0xe51f0000)
+
 #define MAKE_AARCH32_BX(Rm) ((((Rm) & 0xf) << 0) | (0b1110000100101111111111110001 << 4))
 #define AARCH32_BX_DECODE_RM(input) ((((input >> 0) & 0xf) << 0))
 #define IS_AARCH32_BX(input) ((input & 0xfffffff0) == 0xe12fff10)
+
+#define MAKE_AARCH32_B(imm) ((((imm) & 0xffffff) << 0) | (0b11101010 << 24))
+#define AARCH32_B_DECODE_IMM(input) ((((input >> 0) & 0xffffff) << 0))
+#define IS_AARCH32_B(input) ((input & 0xff000000) == 0xea000000)
+
 // END AUTO GENERATED MACROS
 
 void *LHHookerMapRwxPages(size_t size) {

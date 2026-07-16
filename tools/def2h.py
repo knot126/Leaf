@@ -278,6 +278,7 @@ def main():
 	print("//", ins)
 	
 	for x in ins:
+		print()
 		print(x.getMakeDefine())
 		print(x.getDecodeDefines())
 		print(x.getIsDefine())
