@@ -57,6 +57,9 @@ typedef struct LeafDetourAlloc {
 	LeafDetourNearBlockFunction func;
 } LeafDetourAlloc;
 
+/**
+ * Detour Metadata Object
+ */
 typedef struct LeafDetour {
 	// Pointer to the call address of the function that is being detoured.
 	void *function;
@@ -160,8 +163,8 @@ static inline void LeafDetour_LongJump(unsigned char *buffer, void *from, void *
 
 int LeafDetourPrepareEx(LeafDetour *self, void *function, size_t function_size, void *detour, size_t detour_size, LeafDetourAlloc *near) {
 	/**
-	 * Initialise a detour for a function at the given address, but do not yet
-	 * install it.
+	 * Initialise all of the instructions and metadata for a detour. Does not
+	 * install the detour.
 	 */
 	
 	self->function = function;
@@ -218,6 +221,11 @@ int LeafDetourPrepareEx(LeafDetour *self, void *function, size_t function_size, 
 }
 
 void LeafDetourSwap(LeafDetour *self) {
+	/**
+	 * Toggle the detour on and off by swapping the buffered instructions and
+	 * the instructions currently at the function address.
+	 */
+	
 	unsigned char tempbuf[LEAF_DETOUR_MAX_SIZE];
 	
 	memcpy(tempbuf, self->function, self->buffer_size);
@@ -226,12 +234,25 @@ void LeafDetourSwap(LeafDetour *self) {
 }
 
 void LeafDetourDestroyEx(LeafDetour *self, LeafDetourAlloc *near) {
+	/**
+	 * Free any resources associated with a detour. The allocator must be the
+	 * same one used to initialise the detour.
+	 */
+	
 	if (self->trampoline && near) {
 		(near->func)(near->context, self->trampoline, 0);
 	}
 }
 
 int LeafDetourCreateEx(LeafDetour *self, void *function, size_t function_size, void *detour, size_t detour_size, LeafDetourAlloc *near) {
+	/**
+	 * Initialise all of the instructions and metadata for a detour and install
+	 * it.
+	 * 
+	 * This is effectively the same as calling LeafDetourPrepareEx() then
+	 * LeafDetourSwap().
+	 */
+	
 	int result = LeafDetourPrepareEx(self, function, function_size, detour, detour_size, near);
 	
 	if (result) {

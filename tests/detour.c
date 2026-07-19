@@ -35,7 +35,7 @@
 #include "../leaf.h"
 
 #define LEAF_DETOURS_IMPLEMENTATION
-#include "../leaf_detour.h"
+#include "../leaf_detours.h"
 
 void print_usage(const char *name) {
 	fprintf(stderr, "leafrun -- Load and run a function from a shared object using Leaf\n\nUsage:\n%s <function> <object> [ARGS ...]\n\nWhere:\n\t<function> is the symbol name of the function to execute\n\t<object> is the path to the library or executable\n\tARGS are main()-like arguments passed to the function\n", name);
