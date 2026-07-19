@@ -37,13 +37,13 @@
 #define LEAF_DETOUR_OUT_OF_RANGE (-3)
 
 #ifdef __arm__
-#define LEAF_DETOUR_MAX_SIZE 0x8
+#define LEAF_DETOUR_MAX_SIZE 8
 #elif defined(__aarch64__)
-#define LEAF_DETOUR_MAX_SIZE 0x10
+#define LEAF_DETOUR_MAX_SIZE 16
 #elif defined(__i386__)
-#define LEAF_DETOUR_MAX_SIZE 0x6
+#define LEAF_DETOUR_MAX_SIZE 6
 #elif defined(__x86_64__)
-#define LEAF_DETOUR_MAX_SIZE 0xC // TODO: What is it?
+#define LEAF_DETOUR_MAX_SIZE 12 // TODO: What is it?
 #else
 #error "Platform unsupported"
 #endif
@@ -96,25 +96,31 @@ int LeafDetourCreateEx(LeafDetour *self, void *function, size_t function_size, v
 
 /// ARCH SPECIFIC HELPERS ///
 #ifdef __arm__
-#define SMALL_JUMP_IN_RANGE(FROM, TO) IN_RANGE(-33554432, ((size_t)(TO) - (size_t)(FROM)), 33554428)
+#define LEAF_DETOURS_SMALL_JUMP_IN_RANGE(FROM, TO) IN_RANGE(-33554432, ((int32_t)(TO) - (int32_t)(FROM)), 33554428)
 
-#define LONG_JUMP_SIZE 8
+#define LEAF_DETOURS_LONG_JUMP_SIZE 8
 static inline void LeafDetour_LongJump(unsigned char *buffer, void *from, void *to) {
 	uint32_t *buf = (uint32_t *) buffer;
+	// this doesn't seem to work well! why.
 	buf[0] = 0xe51ff004; // ldr pc, [pc, #-4]; 1110 0101 0001 1111 1111 0000 0000 0100
 	buf[1] = (uint32_t) to;
+#if 0
+	buf[0] = 0xe59fc000;
+	buf[1] = 0xe12fff1c;
+	buf[2] = (uint32_t) to;
+#endif
 }
 
-#define SMALL_JUMP_SIZE 4
+#define LEAF_DETOURS_SMALL_JUMP_SIZE 4
 static inline void LeafDetour_ShortJump(unsigned char *buffer, void *from, void *to) {
 	uint32_t *buf = (uint32_t *) buffer;
 	const size_t pcoffset = (((size_t)to - (size_t)from) - 8) >> 2;
 	buf[0] = 0xea000000 | (pcoffset & 0xffffff); // b <imm24>
 }
 #elif defined(__aarch64__)
-#define SMALL_JUMP_IN_RANGE(FROM, TO) IN_RANGE(-134217728, ((size_t)(TO) - (size_t)(FROM)), 134217724)
+#define LEAF_DETOURS_SMALL_JUMP_IN_RANGE(FROM, TO) IN_RANGE(-134217728, ((int64_t)(TO) - (int64_t)(FROM)), 134217724)
 
-#define LONG_JUMP_SIZE 16
+#define LEAF_DETOURS_LONG_JUMP_SIZE 16
 static inline void LeafDetour_LongJump(unsigned char *buffer, void *from, void *to) {
 	uint32_t * const buf = (uint32_t *) buffer;
 	size_t * const bufzz = (size_t *) buffer;
@@ -123,14 +129,14 @@ static inline void LeafDetour_LongJump(unsigned char *buffer, void *from, void *
 	bufzz[1] = (size_t) to;
 } 
 
-#define SMALL_JUMP_SIZE 4
+#define LEAF_DETOURS_SMALL_JUMP_SIZE 4
 static inline void LeafDetour_ShortJump(unsigned char *buffer, void *from, void *to) {
 	uint32_t * const buf = (uint32_t *) buffer;
 	const size_t pcoffset = ((size_t)to - (size_t)from) >> 2;
 	buf[0] = 0x14000000 | (pcoffset & 0x3ffffff); // b <imm26>
 }
 #elif defined(__i386__)
-#define LONG_JUMP_SIZE 5
+#define LEAF_DETOURS_LONG_JUMP_SIZE 5
 static inline void LeafDetour_LongJump(unsigned char *buffer, void *from, void *to) {
 	// EIP is the instruction following jump
 	const size_t pcoffset = ((size_t)to - (size_t)from) - 5;
@@ -138,7 +144,7 @@ static inline void LeafDetour_LongJump(unsigned char *buffer, void *from, void *
 	*(uint32_t *)(buffer + 1) = pcoffset;
 }
 #elif defined(__x86_64__)
-#define LONG_JUMP_SIZE 12
+#define LEAF_DETOURS_LONG_JUMP_SIZE 12
 static inline void LeafDetour_LongJump(unsigned char *buffer, void *from, void *to) {
 	// RAX seems(?) safe to modify between function calls, like the arm IP
 	// register
@@ -161,13 +167,13 @@ int LeafDetourPrepareEx(LeafDetour *self, void *function, size_t function_size, 
 	self->function = function;
 	self->trampoline = NULL;
 	
-#ifdef SMALL_JUMP_IN_RANGE
-	const uint8_t in_small_range = SMALL_JUMP_IN_RANGE(function, detour);
+#ifdef LEAF_DETOURS_SMALL_JUMP_IN_RANGE
+	const uint8_t in_small_range = LEAF_DETOURS_SMALL_JUMP_IN_RANGE(function, detour);
 	
 	// Close enough detours functions get a short jump automatically
 	if (in_small_range) {
-		if (function_size >= SMALL_JUMP_SIZE) {
-			self->buffer_size = SMALL_JUMP_SIZE;
+		if (function_size >= LEAF_DETOURS_SMALL_JUMP_SIZE) {
+			self->buffer_size = LEAF_DETOURS_SMALL_JUMP_SIZE;
 			LeafDetour_ShortJump(self->buffer, function, detour);
 			return LEAF_DETOUR_SUCCESS;
 		}
@@ -178,27 +184,28 @@ int LeafDetourPrepareEx(LeafDetour *self, void *function, size_t function_size, 
 #endif
 	
 	// Just long jump if the function is long enough
-	if (function_size >= LONG_JUMP_SIZE) {
-		self->buffer_size = LONG_JUMP_SIZE;
+	if (function_size >= LEAF_DETOURS_LONG_JUMP_SIZE) {
+		self->buffer_size = LEAF_DETOURS_LONG_JUMP_SIZE;
 		LeafDetour_LongJump(self->buffer, function, detour);
 		return LEAF_DETOUR_SUCCESS;
 	}
-#ifdef SMALL_JUMP_IN_RANGE
+#ifdef LEAF_DETOURS_SMALL_JUMP_IN_RANGE
 	// Not long enough for a long jump, but still enough for a short jump to a
 	// trampoline in a special area, if that's available. 
-	else if (near && function_size >= SMALL_JUMP_SIZE) {
-		void *trampoline = (near->func)(near->context, NULL, LONG_JUMP_SIZE);
+	else if (near && (function_size >= LEAF_DETOURS_SMALL_JUMP_SIZE)) {
+		void *trampoline = (near->func)(near->context, NULL, LEAF_DETOURS_LONG_JUMP_SIZE);
 		
 		if (!trampoline) {
 			return LEAF_DETOUR_ALLOC_FAILED;
 		}
 		
 		// Check sanity of user's function
-		if (!SMALL_JUMP_IN_RANGE(function, trampoline)) {
+		if (!LEAF_DETOURS_SMALL_JUMP_IN_RANGE(function, trampoline)) {
+			(near->func)(near->context, trampoline, 0);
 			return LEAF_DETOUR_OUT_OF_RANGE;
 		}
 		
-		self->buffer_size = SMALL_JUMP_SIZE;
+		self->buffer_size = LEAF_DETOURS_SMALL_JUMP_SIZE;
 		LeafDetour_ShortJump(self->buffer, function, trampoline); // func -> trampoline
 		LeafDetour_LongJump(trampoline, trampoline, detour); // trampoline -> detour
 		
