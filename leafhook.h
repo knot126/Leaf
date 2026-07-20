@@ -1,5 +1,5 @@
 /**
- * LeafHook - single header detouring and hooking library usable with Leaf
+ * LeafHook - single header hooking library usable with Leaf
  * 
  * *****************************************************************************
  * 
@@ -22,16 +22,13 @@
 #include <inttypes.h>
 #include <stdlib.h>
 
-typedef struct LHDetour {
-	void *function_address;
-} LHDetour;
-
 typedef struct LHHooker {
 	void *rwx_block;
 	size_t rwx_block_size;
 	size_t rwx_block_used;
 } LHHooker;
 
+LHHooker *LHHookerCreateEx(size_t npages);
 LHHooker *LHHookerCreate(void);
 void LHHookerRelease(LHHooker *self);
 
@@ -105,7 +102,7 @@ void *LHHookerMapRwxPages(size_t size) {
 	return mmap(NULL, size, PROT_EXEC | PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 }
 
-LHHooker *LHHookerCreate(void) {
+LHHooker *LHHookerCreateEx(size_t npages) {
 	/**
 	 * Create a new hook manager
 	 */
@@ -118,7 +115,7 @@ LHHooker *LHHookerCreate(void) {
 	
 	memset(self, 0, sizeof *self);
 	
-	self->rwx_block_size = 10 * getpagesize();
+	self->rwx_block_size = npages * getpagesize();
 	self->rwx_block = LHHookerMapRwxPages(self->rwx_block_size);
 	
 	if (!self->rwx_block) {
@@ -127,6 +124,10 @@ LHHooker *LHHookerCreate(void) {
 	}
 	
 	return self;
+}
+
+LHHooker *LHHookerCreate(void) {
+	return LHHookerCreateEx(10);
 }
 
 void LHHookerRelease(LHHooker *self) {
