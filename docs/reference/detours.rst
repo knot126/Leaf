@@ -2,16 +2,55 @@
 Leaf Detours
 ============
 
+Notes
+=====
+
+* Please remember that you are responsible for ensuring that any affected pages
+  are readable, writable, and executable when they need to be. When using with
+  an ELF loader like Leaf, that always loads all pages as RWX, this is not a
+  problem.
+
+Structures
+==========
+
+.. struct:: LeafDetour
+
+   State for a single detour
+   
+   .. member:: void *function
+   
+   A pointer to the detoured function's address.
+   
+   .. member:: void *trampoline
+   
+   If using a double trampoline, this a pointer to the allocated trampoline.
+   It is NULL if there was no need for a second trampoline.
+   
+   .. member:: size_t buffer_size
+   
+   Amount of real data in the back buffer
+   
+   .. member:: unsigned char buffer[LEAF_DETOUR_MAX_SIZE]
+   
+   A back buffer which is large enough to hold the biggest jump instruction
+   size available. This holds either the replaced bytes of the instruction
+   (when the detour is installed) or the trampoline instructions (when the
+   hook is uninstalled).
+
+User Segment Allocator
+----------------------
+
 .. type:: void *(*LeafDetourNearBlockFunction)(void *context, void *block, size_t size)
    
    A function that:
    
-   * When ``block`` is ``NULL`` and ``size`` > 0, allocates a block of memory of
+   * When ``block`` is ``NULL`` and :expr:`size > 0`, allocates a block of memory of
      at least ``size`` bytes nearby the ``.text`` segment of the binary
      containing the function to hook. On success it returns a pointer to the
      start of the block, and on failure returns ``NULL``.
-   * When ``block`` is not ``NULL`` and ``size`` == 0, *may* deallocate a
-     previously allocated block for future use. Return value is ignored.
+   * When ``block`` is not ``NULL`` and :expr:`size == 0`, *may* deallocate a
+     previously allocated block for future use. Return value is ignored, but
+     should probably be :expr:`NULL`.
    * Otherwise, is undefined.
    
    You can optionally provide a ``context``.
@@ -29,34 +68,35 @@ Leaf Detours
       
       A pointer to the allocation function
 
-.. struct:: LeafDetour
-   
-   State for a single detour
-   
-   .. member:: void *function
-      
-      A pointer to the detoured function's address.
-      
-   .. member:: void *trampoline
-      
-      If using a double trampoline, this a pointer to the allocated trampoline.
-      It is NULL if there was no need for a second trampoline.
-      
-   .. member:: size_t buffer_size
-      
-      Amount of real data in the back buffer
-      
-   .. member:: unsigned char buffer[LEAF_DETOUR_MAX_SIZE]
-      
-      A back buffer which is large enough to hold the biggest jump instruction
-      size available. This holds either the replaced bytes of the instruction
-      (when the detour is installed) or the trampoline instructions (when the
-      hook is uninstalled).
+Constants
+=========
 
 .. macro:: LEAF_DETOUR_MAX_SIZE
    
    The size of the largest trampoline construct supported with the architecture
    that Leaf Detours is being compiled for.
+
+.. macro:: LEAF_DETOUR_SUCCESS
+   
+   For operations that return integer status codes, indicates success.
+
+.. macro:: LEAF_DETOUR_NO_SPACE
+   
+   Indicates that you tried hooking a function that is too small to be hooked
+   given the current constraints.
+
+.. macro:: LEAF_DETOUR_ALLOC_FAILED
+   
+   Indicates that your allocator function failed to allocate memory (e.g. it
+   returned :expr:`NULL` when :expr:`size > 0`).
+
+.. macro:: LEAF_DETOUR_OUT_OF_RANGE
+   
+   Indicates that your allocator returned a block which is too far to be jumped
+   to from the function to be hooked. This should only occur with big binaries.
+
+Functions
+=========
 
 .. function:: int LeafDetourPrepareEx(LeafDetour *self, void *function, size_t function_size, void *detour, size_t detour_size, LeafDetourAlloc *near)
    
