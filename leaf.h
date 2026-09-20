@@ -92,6 +92,11 @@ typedef struct LeafLoadedSegment {
 	size_t orig_flags;
 } LeafLoadedSegment;
 
+typedef struct LeafFlags {
+	// Don't call LeafDoInit() in LeafLoad()
+	LEAF_DONT_INIT = (1 << 0),
+};
+
 typedef struct LeafParams {
 	// Request a fixed load address for ELFs which can be loaded at any address.
 	// Set to 0/NULL to disable this feature.
@@ -104,6 +109,9 @@ typedef struct LeafParams {
 	// binary to jump to it.
 	size_t pre_extra_size;
 	size_t post_extra_size;
+	
+	// On and off options used when creating an instance
+	LeafFlags flags;
 } LeafParams;
 
 typedef struct Leaf {
@@ -176,11 +184,13 @@ bool LeafSetLoaderCallbacks(Leaf *self, LeafDlopenFunction open, LeafDlsymFuncti
 const char *LeafLoad(Leaf *self, LeafStream *stream);
 const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length);
 const char *LeafLoadFromFile(Leaf *self, const char *path);
+void LeafDoInit(Leaf *self);
 void *LeafGetEntryPoint(Leaf *self);
 void *LeafSymbolAddr(Leaf *self, const char *symbol_name);
 LeafSym *LeafSymbolInfo(Leaf *self, const char *symbol_name);
 void *LeafGetRealAddr(Leaf *self, size_t virt_addr);
 void *LeafGetSegment(Leaf *self, int64_t index, size_t *segment_size);
+void LeafFinish(Leaf *self);
 void LeafFree(Leaf *self);
 
 #ifdef LEAF_IMPLEMENTATION
@@ -292,7 +302,7 @@ static void LeafStreamFree(LeafStream *self) {
 // Stub functions
 /////////////////
 static int Leaf__cxa_atexit(void (*func)(void *), void *arg, void *dso_handle) {
-	LOG("__cxa_atexit(<%p>, <%p>, <%p>)", func, arg, dso_handle);
+	LOG("__cxa_atexit(<%p>, <%p>, <%p>)\n", func, arg, dso_handle);
 	return 0;
 }
 
@@ -1012,7 +1022,9 @@ static const char *LeafProcessDynamicSegment(Leaf *self, LeafDyn *dyns) {
 	}
 	
 	// Call init functions
-	LeafDoInit(self);
+	if ((self->params.flags & LEAF_DONT_INIT) != LEAF_DONT_INIT) {
+		LeafDoInit(self);
+	}
 	
 	return NULL;
 }

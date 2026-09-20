@@ -132,6 +132,9 @@ Smash Hit it has worked fine. This also means that x86 support would be
 complicated due to the instruction set not being as easy to decode or test for
 relevant instructions.
 
+Calling the Original By Cheating
+================================
+
 Hooking Small Functions with Double Trampolines
 ===============================================
 
@@ -149,6 +152,10 @@ forming a double trampoline which will call the function in the end.
 *Leaf Detours* is able to integrate with the *Leaf ELF Loader* to make hooking
 small functions possible in this manner. It does require the application to
 write its own allocator to manage Leaf's block of memory.
+
+----------------------------------
+Function Pointer and V-Table Hooks
+----------------------------------
 
 ---------------------------------
 Hooking with Software Breakpoints
