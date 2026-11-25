@@ -1,7 +1,6 @@
 /**
- * Leaf, a single header ELF loader. Supports 32-bit and 64-bit ARM, as well as
- * 32-bit x86. Always loads sections as RWX. Primarily targets Android, should
- * also work on GNU/Linux.
+ * Leaf: a single header ELF loader Always loads sections as RWX. Primarily
+ * targets Android and GNU/Linux, supporting AArch32, AArch64, i386 and AMD64.
  * 
  * ****************************************************************************
  * 
@@ -43,36 +42,50 @@
 #include <unistd.h>
 #include <stdint.h>
 
+#ifndef LEAF_NO_STDIO
+#include <stdio.h>
+#endif
+
 #if defined(__arm__) || defined(__i386__)
 #define LEAF_32BIT
 #endif
 
 #ifdef LEAF_32BIT
 	#define LEAF_CURRENT_CLASS 1
-	#define LeafEhdr Elf32_Ehdr
-	#define LeafPhdr Elf32_Phdr
-	#define LeafDyn  Elf32_Dyn
-	#define LeafRel  Elf32_Rel
-	#define LeafRela Elf32_Rela
-	#define LeafSym  Elf32_Sym
-	#define LeafAddr Elf32_Addr
+	#define LeafEhdr   Elf32_Ehdr
+	#define LeafPhdr   Elf32_Phdr
+	#define LeafDyn    Elf32_Dyn
+	#define LeafRel    Elf32_Rel
+	#define LeafRela   Elf32_Rela
+	#define LeafSym    Elf32_Sym
+	#define LeafAddr   Elf32_Addr
+	#define LeafAddend Elf32_Sword
 	#define LeafRelocSym(i) (i >> 8)
 	#define LeafRelocType(i) (i & 0xff)
 #else
 	#define LEAF_CURRENT_CLASS 2
-	#define LeafEhdr Elf64_Ehdr
-	#define LeafPhdr Elf64_Phdr
-	#define LeafDyn  Elf64_Dyn
-	#define LeafRel  Elf64_Rel
-	#define LeafRela Elf64_Rela
-	#define LeafSym  Elf64_Sym
-	#define LeafAddr Elf64_Addr
+	#define LeafEhdr   Elf64_Ehdr
+	#define LeafPhdr   Elf64_Phdr
+	#define LeafDyn    Elf64_Dyn
+	#define LeafRel    Elf64_Rel
+	#define LeafRela   Elf64_Rela
+	#define LeafSym    Elf64_Sym
+	#define LeafAddr   Elf64_Addr
+	#define LeafAddend Elf64_Sxword
 	#define LeafRelocSym(i) (i >> 32)
 	#define LeafRelocType(i) (i & 0xffffffff)
 #endif
 
 #ifndef DT_GNU_HASH
 	#define DT_GNU_HASH 0x6ffffef5
+#endif
+
+#ifndef DF_1_PIE
+	#define DF_1_PIE 0x08000000
+#endif
+
+#ifndef DT_SYMTABSZ
+	#define DT_SYMTABSZ 39
 #endif
 
 // Same for 32/64 bit
@@ -92,10 +105,14 @@ typedef struct LeafLoadedSegment {
 	size_t orig_flags;
 } LeafLoadedSegment;
 
-typedef struct LeafFlags {
+typedef enum LeafFlags {
 	// Don't call LeafDoInit() in LeafLoad()
 	LEAF_DONT_INIT = (1 << 0),
-};
+	
+	// Ignore errors while trying to load shared libraries that the loaded ELF
+	// depends on.
+	LEAF_IGNORE_NEEDED_LIB_ERRORS = (1 << 1),
+} LeafFlags;
 
 typedef struct LeafParams {
 	// Request a fixed load address for ELFs which can be loaded at any address.
@@ -183,7 +200,9 @@ Leaf *LeafInit(const LeafParams *params);
 bool LeafSetLoaderCallbacks(Leaf *self, LeafDlopenFunction open, LeafDlsymFunction sym, LeafDlcloseFunction close);
 const char *LeafLoad(Leaf *self, LeafStream *stream);
 const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length);
+#ifndef LEAF_NO_STDIO
 const char *LeafLoadFromFile(Leaf *self, const char *path);
+#endif
 void LeafDoInit(Leaf *self);
 void *LeafGetEntryPoint(Leaf *self);
 void *LeafSymbolAddr(Leaf *self, const char *symbol_name);
@@ -192,6 +211,8 @@ void *LeafGetRealAddr(Leaf *self, size_t virt_addr);
 void *LeafGetSegment(Leaf *self, int64_t index, size_t *segment_size);
 void LeafFinish(Leaf *self);
 void LeafFree(Leaf *self);
+
+#define LEAF_IMPLEMENTATION
 
 #ifdef LEAF_IMPLEMENTATION
 
@@ -225,6 +246,10 @@ void LeafFree(Leaf *self);
 #else
 	#define LOG(...)
 #endif
+
+typedef enum LeafRelocatorFlags {
+	LEAF_RELOC_SYMBOL_ONLY = 1,
+} LeafRelocatorFlags;
 
 static LeafStream *LeafStreamInit(uint8_t *buffer, size_t size) {
 	/**
@@ -549,8 +574,8 @@ const uint8_t ELF_SIGNATURE[] = {0x7f, 'E', 'L', 'F'};
 static bool LeafIsPositionIndependent(Leaf *self, LeafDyn *dyns);
 static void LeafDoRela(Leaf *self, LeafRela *relocs, size_t reloc_count);
 static void LeafDoRel(Leaf *self, LeafRel *relocs, size_t reloc_count);
-static void LeafDoInit(Leaf *self);
 static const char *LeafProcessDynamicSegment(Leaf *self, LeafDyn *dyns);
+static void LeafSolveSymbolTable(Leaf *self);
 
 const char *LeafLoad(Leaf *self, LeafStream *stream) {
 	// Read header
@@ -628,7 +653,7 @@ const char *LeafLoad(Leaf *self, LeafStream *stream) {
 		return "Failed to allocate memory for segment information";
 	}
 	
-	// Initialise segment structures, map memory and load segments
+	// Initialise segment structures, map memory and load segment information
 	LeafDyn *dyns = NULL;
 	size_t min_vaddr = (size_t)-1;
 	size_t max_vaddr = 0;
@@ -638,20 +663,23 @@ const char *LeafLoad(Leaf *self, LeafStream *stream) {
 	for (size_t i = 0, j = 0; i < phnum; i++) {
 		LeafPhdr *phdr = self->phdrs[i];
 		
-		if (self->phdrs[i]->p_type == PT_LOAD) {
+		if (phdr->p_type == PT_LOAD) {
 			min_vaddr = (phdr->p_vaddr < min_vaddr) ? phdr->p_vaddr : min_vaddr;
 			max_vaddr = ((phdr->p_vaddr + phdr->p_memsz) > max_vaddr) ? (phdr->p_vaddr + phdr->p_memsz) : max_vaddr;
 			max_align = (phdr->p_align > max_align) ? phdr->p_align : max_align;
 		}
 		else if (phdr->p_type == PT_DYNAMIC) {
-			// TODO: I'd like to actually load the dynamic segment into
-			// permanent memory.
+			// TODO: I'd like to ensure the dynamic segment is loaded into
+			// memory.
 			LeafStreamSetpos(stream, phdr->p_offset);
 			dyns = LeafStreamGetptr(stream);
 			
 			// Get if this is PIC - we need this in order to determine if a
 			// static executable is PIE or not
 			pie = LeafIsPositionIndependent(self, dyns);
+		}
+		else if (phdr->p_type == PT_TLS) {
+			return "Thread Local Storage is not supported by Leaf";
 		}
 	}
 	
@@ -673,15 +701,11 @@ const char *LeafLoad(Leaf *self, LeafStream *stream) {
 	LOG("Pre-ELF extra size adjusted to 0x%zx\n", self->params.pre_extra_size);
 	
 	if (self->fixed) {
-		// LOG("Solid LeafMakeFixedMap(addr=0x%zx, size=0x%zx)\n", min_vaddr, max_vaddr - min_vaddr);
-		
 		self->block_size = max_vaddr - min_vaddr;
 		const size_t map_size = self->block_size + self->params.pre_extra_size + self->params.post_extra_size;
 		self->block = LeafMakeFixedMap(min_vaddr - self->params.pre_extra_size, map_size);
 	}
 	else {
-		// LOG("Solid LeafMakeMap(size=0x%zx, align=0x%zx)\n", max_vaddr, max_align);
-		
 		self->block_size = max_vaddr;
 		const size_t map_size = self->block_size + self->params.pre_extra_size + self->params.post_extra_size;
 		
@@ -700,15 +724,11 @@ const char *LeafLoad(Leaf *self, LeafStream *stream) {
 	// Make block point past pre-ELF extra part
 	self->block += self->params.pre_extra_size;
 	
-	// *sigh* I don't really want to loop over everything a third goddamn time,
-	// but I've been forced here. I was originally going to implement "spare"
-	// section loading, so that both sections were loaded at 64K boundaries, but
-	// it seems like Smash Hit does not contain information to relocate most
-	// references properly...
+	// Load segment contents into memory
 	for (size_t i = 0, j = 0; i < phnum; i++) {
 		LeafPhdr *phdr = self->phdrs[i];
 		
-		if (self->phdrs[i]->p_type == PT_LOAD) {
+		if (phdr->p_type == PT_LOAD) {
 			LeafLoadedSegment *seg = &self->segments[j];
 			
 			seg->addr = self->fixed ? (void *)phdr->p_vaddr : self->block + phdr->p_vaddr;
@@ -724,7 +744,6 @@ const char *LeafLoad(Leaf *self, LeafStream *stream) {
 			
 			j++;
 		}
-		// TODO: Thread Local Storage
 	}
 	
 	if (dyns) {
@@ -760,21 +779,21 @@ static const char *LeafProcessDynamicSegment(Leaf *self, LeafDyn *dyns) {
 	size_t reloc_types; // HACK the entire handling of reloc types is hacky
 	
 	void *relocs = NULL;
-	size_t reloc_size;
-	size_t reloc_ent_size;
+	size_t reloc_size = 0;
+	size_t reloc_ent_size = 0;
 	
 	void *plt_relocs = NULL;
-	size_t plt_relocs_size;
+	size_t plt_relocs_size = 0;
 	
 	LeafSym *symtab = NULL;
 	size_t sym_count = 0;
-	size_t sym_ent_size;
+	size_t sym_ent_size = sizeof(LeafSym);
 	
 	void **init_array = NULL;
-	size_t init_array_size;
+	size_t init_array_size = 0;
 	
 	void **fini_array = NULL;
-	size_t fini_array_size;
+	size_t fini_array_size = 0;
 	
 	for (size_t i = 0; dyns[i].d_tag != DT_NULL; i++) {
 		switch (dyns[i].d_tag) {
@@ -796,8 +815,22 @@ static const char *LeafProcessDynamicSegment(Leaf *self, LeafDyn *dyns) {
 				break;
 			}
 			case DT_GNU_HASH: {
+				/**
+				 * While the ELF spec states DT_SYMTABSZ is required if the ABI
+				 * decides not to provide DT_HASH, this is only a recent
+				 * addition and unfortunately does not correct the many
+				 * historical binaries that will have DT_GNU_HASH but not
+				 * DT_SYMTABSZ, so this is needed. It sucks, but when GNU is
+				 * involved that ought to be an expectation.
+				 * 
+				 * SEE: https://github.com/xinuos/gabi/issues/4
+				 */
 				LeafGnuHashTable *ght = LeafGetRealAddr(self, dyns[i].d_un.d_val);
 				sym_count = LeafSymbolTableLengthFromGnuHash(ght);
+				break;
+			}
+			case DT_SYMTABSZ: {
+				sym_count = dyns[i].d_un.d_val / sym_ent_size;
 				break;
 			}
 			case DT_STRTAB: {
@@ -829,7 +862,7 @@ static const char *LeafProcessDynamicSegment(Leaf *self, LeafDyn *dyns) {
 				break;
 			}
 			case DT_SYMBOLIC: {
-				LOG("Leaf: DT_SYMBOLIC\n");
+				LOG("Leaf: DT_SYMBOLIC has no meaning for Leaf\n");
 				break;
 			}
 			case DT_REL: {
@@ -845,7 +878,7 @@ static const char *LeafProcessDynamicSegment(Leaf *self, LeafDyn *dyns) {
 				break;
 			}
 			case DT_BIND_NOW: {
-				LOG("Leaf: DT_BIND_NOW\n");
+				LOG("DT_BIND_NOW has no meaning for Leaf\n");
 				break;
 			}
 			case DT_PLTREL: {
@@ -928,55 +961,7 @@ static const char *LeafProcessDynamicSegment(Leaf *self, LeafDyn *dyns) {
 	
 	// Reloc everything in symbol table, load external symbols
 	// TODO Break this out into its own thing
-	LOG("Have %zd symbols, fixing up symbol table...\n", sym_count);
-	
-	for (size_t i = 1; i < sym_count; i++) {
-		LeafSym *sym = &symtab[i];
-		
-		switch (sym->st_shndx) {
-			case SHN_ABS: {
-				// "The symbol has an absolute value that will not change
-				// because of relocation."
-				break;
-			}
-			case SHN_COMMON: {
-				LOG("Symbol with SHN_COMMON, is this the 90s!?\n");
-				break;
-			}
-			case SHN_UNDEF: {
-				// resolve the symbol in the dumest way possible
-				// TODO: also probably not technically correct since ELF has
-				// stricter search order requirements than this but
-				// whatever, it works for now.
-				const char *symbol_name = strtab + sym->st_name;
-				
-				for (size_t j = 0; j < self->dl_handle_count; j++) {
-					if (self->dl_handles[j] != NULL) {
-						void *symbol_value = LeafDlsym(self, self->dl_handles[j], symbol_name);
-						
-						if (symbol_value) {
-							sym->st_value = (LeafAddr) symbol_value;
-							break;
-						}
-					}
-				}
-				
-				if (sym->st_value) {
-					// LOG("Found symbol '%s' at <0x%zx>\n", symbol_name, sym->st_value);
-				}
-				else {
-					LOG("Warning: External symbol named '%s' not found.\n", symbol_name);
-				}
-				
-				break;
-			}
-			default: {
-				// not a special case, just relocate to it's loaded address
-				sym->st_value = (LeafAddr) LeafGetRealAddr(self, sym->st_value);
-				break;
-			}
-		}
-	}
+	LeafSolveSymbolTable(self);
 	
 	// Replace __cxa_atexit with our own dummy
 	// TODO: Is this realllly needed?
@@ -1142,6 +1127,164 @@ static void LeafDoRel(Leaf *self, LeafRel *relocs, size_t reloc_count) {
 	}
 }
 
+#define OFFSET (((LeafRela *)(relocs))->r_offset)
+#define INFO (((LeafRela *)(relocs))->r_info)
+#define ADDEND ((reloc_type == DT_RELA) ? (((LeafRela *)(relocs))->r_addend) : (LeafAddend)(*where))
+
+// Symbol only relocation runs which occur after PLT is hooked avoid
+// doing relocations that don't involve symbols
+#define NON_SYMBOL if (flags & LEAF_RELOC_SYMBOL_ONLY) break
+
+static void LeafPreformRelocations(Leaf *self, uint32_t reloc_type, size_t reloc_ent_size, void *relocs, size_t reloc_count, LeafRelocatorFlags flags) {
+	for (size_t i = 0; i < reloc_count; i++) {
+		void ** const where = LeafGetRealAddr(self, OFFSET);
+		
+		switch (LeafRelocType(INFO)) {
+#ifdef __arm__
+			case R_ARM_RELATIVE: {
+				NON_SYMBOL;
+				*((void **)where) = LeafGetRealAddr(self, ADDEND);
+				break;
+			}
+			case R_ARM_GLOB_DAT: {
+				// <place> = (S + A) | T
+				LeafSym *sym = &self->symtab[LeafRelocSym(INFO)];
+				*((size_t *)where) += (sym->st_value & 1) ? (sym->st_value ^ 1) : sym->st_value;
+				*((size_t *)where) |= (LeafSymType(sym->st_info) == STT_FUNC && (sym->st_value & 1)) ? 1 : 0;
+				break;
+			}
+			case R_ARM_JUMP_SLOT: {
+				// From the manual for jump slots in REL form:
+				// "In a REL form of this relocation the addend, A, is always 0."
+				LeafSym *sym = &self->symtab[LeafRelocSym(INFO)];
+				*((size_t *) where) = sym->st_value;
+				break;
+			}
+#endif
+#ifdef __i386__
+			case R_386_COPY: {
+				// TODO
+				break;
+			}
+			case R_386_RELATIVE: {
+				// B + A
+				NON_SYMBOL;
+				*((void **)where) = LeafGetRealAddr(self, ADDEND);;
+				break;
+			}
+			case R_386_GLOB_DAT:
+			case R_386_JMP_SLOT: {
+				// S
+				LeafSym *sym = &self->symtab[LeafRelocSym(INFO)];
+				*((size_t *)where) = sym->st_value;
+				break;
+			}
+#endif
+#ifdef __aarch64__
+			case R_AARCH64_RELATIVE: {
+				NON_SYMBOL;
+				// I think this works (?) since all symbols are zero in my case.
+				*((void **)where) = LeafGetRealAddr(self, ADDEND);
+				break;
+			}
+			case R_AARCH64_GLOB_DAT:
+			case R_AARCH64_JUMP_SLOT: {
+				const LeafSym * const sym = &self->symtab[LeafRelocSym(INFO)];
+				*((size_t *)where) = sym->st_value + ADDEND;
+				break;
+			}
+#endif
+#ifdef __x86_64__
+			case R_X86_64_RELATIVE: {
+				NON_SYMBOL;
+				*((void **)where) = LeafGetRealAddr(self, ADDEND);
+				break;
+			}
+			case R_X86_64_IRELATIVE: {
+				NON_SYMBOL;
+				// R_X86_64_IRELATIVE is similar to R_X86_64_RELATIVE except
+				// that the value [...] is the program address returned by the
+				// function, which takes no arguments, at the address of the
+				// result of the corresponding R_X86_64_RELATIVE relocation.
+				void *result = LeafGetRealAddr(self, ADDEND);
+				result = ((void *(*)(void)) result)();
+				*((void **)where) = result;
+				break;
+			}
+			case R_X86_64_GLOB_DAT:
+			case R_X86_64_JUMP_SLOT: {
+				LeafSym *sym = &self->symtab[LeafRelocSym(INFO)];
+				*((size_t *)where) = sym->st_value + ADDEND;
+				break;
+			}
+#endif
+			default: {
+				LOG("Unknown or unsupported reloc: offset=0x%zx sym=0x%zx type=0x%zx\n", (size_t)OFFSET, (size_t)LeafRelocSym(INFO), (size_t)LeafRelocType(INFO));
+				break;
+			}
+		}
+		
+		relocs += reloc_ent_size;
+	}
+}
+
+#undef OFFSET
+#undef INFO
+#undef ADDEND
+#undef NON_SYMBOL
+
+void LeafSolveSymbolTable(Leaf *self) {
+	LOG("Have %zd symbols, fixing up symbol table...\n", self->sym_count);
+	
+	for (size_t i = 1; i < self->sym_count; i++) {
+		LeafSym *sym = &self->symtab[i];
+		
+		switch (sym->st_shndx) {
+			case SHN_ABS: {
+				// "The symbol has an absolute value that will not change
+				// because of relocation."
+				break;
+			}
+			case SHN_COMMON: {
+				LOG("Symbol with SHN_COMMON, is this the 90s!?\n");
+				break;
+			}
+			case SHN_UNDEF: {
+				// resolve the symbol in the dumest way possible
+				// TODO: also probably not technically correct since ELF has
+				// stricter search order requirements than this but
+				// whatever, it works for now.
+				const char *symbol_name = self->strtab + sym->st_name;
+				
+				for (size_t j = 0; j < self->dl_handle_count; j++) {
+					if (self->dl_handles[j] != NULL) {
+						void *symbol_value = LeafDlsym(self, self->dl_handles[j], symbol_name);
+						
+						if (symbol_value) {
+							sym->st_value = (LeafAddr) symbol_value;
+							break;
+						}
+					}
+				}
+				
+				if (sym->st_value) {
+					// LOG("Found symbol '%s' at <0x%zx>\n", symbol_name, sym->st_value);
+				}
+				else {
+					LOG("Warning: External symbol named '%s' not found.\n", symbol_name);
+				}
+				
+				break;
+			}
+			default: {
+				// not a special case, just relocate to it's loaded address
+				sym->st_value = (LeafAddr) LeafGetRealAddr(self, sym->st_value);
+				break;
+			}
+		}
+	}
+}
+
 void LeafDoInit(Leaf *self) {
 	LOG("Calling %zu init functions...\n", self->init_count);
 	
@@ -1172,6 +1315,7 @@ const char *LeafLoadFromBuffer(Leaf *self, void *contents, size_t length) {
 	return status;
 }
 
+#ifndef LEAF_NO_STDIO
 const char *LeafLoadFromFile(Leaf *self, const char *path) {
 	FILE *file = fopen(path, "rb");
 	
@@ -1203,6 +1347,7 @@ const char *LeafLoadFromFile(Leaf *self, const char *path) {
 	
 	return error;
 }
+#endif
 
 bool LeafSetLoaderCallbacks(Leaf *self, LeafDlopenFunction open, LeafDlsymFunction sym, LeafDlcloseFunction close) {
 	/**
