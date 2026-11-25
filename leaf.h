@@ -76,6 +76,8 @@
 	#define LeafRelocType(i) (i & 0xffffffff)
 #endif
 
+// TODO: Make our own version of elf.h so we don't have to include stuff like
+// this
 #ifndef DT_GNU_HASH
 	#define DT_GNU_HASH 0x6ffffef5
 #endif
@@ -86,6 +88,10 @@
 
 #ifndef DT_SYMTABSZ
 	#define DT_SYMTABSZ 39
+#endif
+
+#ifndef R_X86_64_IRELATIVE
+	#define R_X86_64_IRELATIVE 37
 #endif
 
 // Same for 32/64 bit
@@ -211,8 +217,6 @@ void *LeafGetRealAddr(Leaf *self, size_t virt_addr);
 void *LeafGetSegment(Leaf *self, int64_t index, size_t *segment_size);
 void LeafFinish(Leaf *self);
 void LeafFree(Leaf *self);
-
-#define LEAF_IMPLEMENTATION
 
 #ifdef LEAF_IMPLEMENTATION
 
